@@ -14,6 +14,14 @@ export const LEGACY_MODEL_ROLE_ALIAS_PREFIX = "pi/";
 /** Shorthand selector for the default model role. */
 export const DEFAULT_MODEL_ROLE_ALIAS = "*";
 
+/** Virtual cycle slot that opens the session model picker instead of switching models. */
+export const CYCLE_SELECTION_ROLE = "selection";
+
+/** Whether a cycle-order entry is the virtual model-picker slot. */
+export function isCycleSelectionRole(role: string): boolean {
+	return role === CYCLE_SELECTION_ROLE;
+}
+
 /** Format a model role as its canonical selector. */
 export function formatModelRoleAlias(role: string): string {
 	return `${MODEL_ROLE_ALIAS_PREFIX}${role}`;
@@ -78,7 +86,7 @@ export function getKnownRoleIds(settings: Settings): string[] {
 	const roles = MODEL_ROLE_IDS.filter(role => !MODEL_ROLES[role as ModelRole]?.hidden) as string[];
 	const seen = new Set<string>(roles);
 	const addRole = (role: string) => {
-		if (seen.has(role)) return;
+		if (seen.has(role) || isCycleSelectionRole(role)) return;
 		seen.add(role);
 		roles.push(role);
 	};

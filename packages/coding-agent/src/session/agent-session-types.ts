@@ -350,9 +350,11 @@ export interface ModelCycleResult {
 
 /** Result from cycleRoleModels(). */
 export interface RoleModelCycleResult {
-	model: Model;
-	thinkingLevel: ThinkingLevel | undefined;
+	model?: Model;
+	thinkingLevel?: ThinkingLevel | undefined;
 	role: string;
+	/** Open the session model picker instead of applying a concrete model. */
+	openPicker?: boolean;
 }
 
 /** A configured role resolved to a concrete model. */

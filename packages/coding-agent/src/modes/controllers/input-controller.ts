@@ -2088,18 +2088,19 @@ export class InputController {
 				return;
 			}
 
-			this.ctx.statusLine.invalidate();
-			this.ctx.updateEditorBorderColor();
-			// The status line already reports the resolved model + thinking level, so
-			// the cycle status is just a status-line-style chip track (active role
-			// filled), matching the plan-approval model slider. It renders into its
-			// own anchored container above the editor (cleared+rebuilt each cycle),
-			// so it updates in place instead of stacking duplicates in the scrollback.
 			const track = renderSegmentTrack(
 				cycleOrder.map(role => ({ label: role })),
 				cycleOrder.indexOf(result.role),
 			);
 			this.ctx.showModelCycleTrack(track);
+
+			if (result.openPicker) {
+				this.ctx.showModelSelector({ temporaryOnly: true });
+				return;
+			}
+
+			this.ctx.statusLine.invalidate();
+			this.ctx.updateEditorBorderColor();
 		} catch (error) {
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		}

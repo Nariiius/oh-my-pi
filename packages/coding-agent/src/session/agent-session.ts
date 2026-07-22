@@ -104,6 +104,8 @@ import { reset as resetCapabilities } from "../capability";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelSelectorValue, formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
+import { getKnownRoleIds, MODEL_ROLE_IDS, MODEL_ROLES } from "../config/model-roles";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -366,6 +368,875 @@ import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+
+type BashAppendDestination =
+	| { kind: "current"; manager: SessionManager }
+	| { kind: "detached"; manager: SessionManager }
+	| { kind: "branch"; manager: SessionManager; parentId: string | null };
+
+interface BashSessionTarget {
+	sessionId: string;
+	refs: number;
+	destination?: BashAppendDestination;
+	pending?: Promise<BashAppendDestination>;
+}
+
+interface PendingBashMessage {
+	target: BashSessionTarget;
+	message: BashExecutionMessage;
+}
+
+interface BashSessionTransition {
+	oldTarget: BashSessionTarget;
+	newTarget: BashSessionTarget;
+	oldSessionId: string;
+	oldSessionFile: string | undefined;
+	oldLeafId: string | null;
+	detachedManager: SessionManager | undefined;
+	resolveOld: ((destination: BashAppendDestination) => void) | undefined;
+	resolveNew: (destination: BashAppendDestination) => void;
+}
+
+/**
+ * Mutating tool results (`bash`/`eval`/`edit`/`write`/`ast_edit`) without the
+ * agent touching the `todo` tool that trip the mid-run reconciliation nudge.
+ * Read-only exploration (grep/read/glob/lsp) never ticks this: an agent
+ * researching for a long stretch has nothing to flip. Picked so a normal
+ * fix-verify loop (~3-6 mutations) never sees the nudge, but a sustained run
+ * of landed work without flipping any todos does. Without this nudge, long
+ * runs drive the live todo HUD to `0/N` until the final stop, then batch-flip
+ * to `N/N` (issue #3651).
+ */
+const MID_RUN_TODO_NUDGE_MUTATION_THRESHOLD = 12;
+/** Mid-run nudges per prompt cycle. Deliberately tighter than
+ *  `todo.remindersMax` (the stop-time budget): this is a gentle hidden hint,
+ *  not an escalation ladder. */
+const MID_RUN_TODO_NUDGE_MAX_PER_CYCLE = 2;
+/** Tool results that count as landed work for the mid-run todo nudge. */
+const MID_RUN_TODO_NUDGE_MUTATING_TOOLS: Record<string, true> = {
+	bash: true,
+	eval: true,
+	edit: true,
+	write: true,
+	ast_edit: true,
+};
+const MARKDOWN_PROMPT_PREFIX_RE = /^(?:>\s*)?(?:(?:[-*+]|\d+[.)])\s+)*/;
+const PROMPT_LABEL_RE = /^(?:q(?:uestion)?|ask)\s*\d*\s*[:.)-]\s*/i;
+const QUESTION_PROMPT_RE =
+	/^(?:what|which|when|where|why|how|who|whom|whose|do|does|did|can|could|would|will|should|is|are|am|may|shall)\b/i;
+const USER_DIRECTED_PROMPT_RE = /\b(?:you|your|we|our)\b/i;
+const USER_RESPONSE_CUE_RE =
+	/^(?:please\s+)?(?:confirm|reply|choose|pick|decide|advise)\b|^(?:please\s+)?answer\b|^(?:please\s+)?(?:let\s+me\s+know|tell\s+me)\b/i;
+
+function assistantText(message: AssistantMessage): string {
+	return message.content
+		.filter((content): content is TextContent => content.type === "text")
+		.map(content => content.text)
+		.join("\n")
+		.trim();
+}
+
+interface PromptLine {
+	text: string;
+	hadPromptLabel: boolean;
+}
+
+function promptLine(line: string): PromptLine {
+	const withoutMarkdownPrefix = line.trim().replace(MARKDOWN_PROMPT_PREFIX_RE, "").trim();
+	const withoutPromptLabel = withoutMarkdownPrefix.replace(PROMPT_LABEL_RE, "").trim();
+	return {
+		text: withoutPromptLabel,
+		hadPromptLabel: withoutPromptLabel !== withoutMarkdownPrefix,
+	};
+}
+
+function isQuestionPromptLine(line: string): boolean {
+	const candidate = promptLine(line);
+	if (!/[?？]\s*$/.test(candidate.text)) return false;
+	return (
+		candidate.hadPromptLabel ||
+		QUESTION_PROMPT_RE.test(candidate.text) ||
+		USER_DIRECTED_PROMPT_RE.test(candidate.text)
+	);
+}
+
+function isResponseCueLine(line: string): boolean {
+	const candidate = promptLine(line)
+		.text.replace(/[.!?。！？]+$/, "")
+		.trim();
+	return USER_RESPONSE_CUE_RE.test(candidate);
+}
+
+function isAwaitingUserAnswer(message: AssistantMessage): boolean {
+	const text = assistantText(message);
+	if (!text) return false;
+	const lastLine = text.split(/\r?\n/).at(-1)?.trim();
+	return lastLine !== undefined && (isQuestionPromptLine(lastLine) || isResponseCueLine(lastLine));
+}
+/** `customType` for the hidden mid-run todo nudge; `display: false`, so it reaches
+ *  the model but never renders in the TUI or transcript. */
+const MID_RUN_TODO_NUDGE_MESSAGE_TYPE = "mid-run-todo-nudge";
+/** Hidden plan nudge injected by prewalk; scrubbed from the LLM context
+ *  when the switch happens. */
+const PREWALK_PLAN_MESSAGE_TYPE = "prewalk-plan";
+/** Hidden safety-net nudge forcing one more turn after a text-only reply to
+ *  the plan nudge, which would otherwise end the run with no code written. */
+const PREWALK_CONTINUE_MESSAGE_TYPE = "prewalk-continue";
+/** Hidden "verify before finishing" checklist steered into the run at the
+ *  switch, aimed at the fast model's specific failure patterns: partial
+ *  multi-site fixes, unnecessarily broad rewrites, and reported-test-only
+ *  verification. */
+const PREWALK_CHECKLIST_MESSAGE_TYPE = "prewalk-checklist";
+/** Hidden steered notice announcing a mid-session `xd://` mount/unmount delta
+ *  (see {@link AgentSession.#notifyXdevMountDelta}). */
+const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
+/** Tools whose first successful call triggers the switch — once the todo
+ *  gate is open (see {@link AgentSession.#prewalkTodoSeen}). Bash is
+ *  deliberately excluded: it doubles as exploration (ls/cat) and fired
+ *  turn-1 switches in practice. `todo` is deliberately NOT a trigger: firing
+ *  at the todo init handed the fast model 100% of the implementation with
+ *  zero started work and measurably regressed pass rates. */
+const PREWALK_ACTION_TOOLS: Record<string, true> = {
+	edit: true,
+	write: true,
+};
+/** `customType` for the hidden hand-off message steered to the target model
+ *  once PlanYolo auto-approves the plan. Unlike prewalk's plan nudge this
+ *  is never scrubbed — it IS the instruction the target model acts on. */
+const PLAN_YOLO_HANDOFF_MESSAGE_TYPE = "plan-yolo-handoff";
+/** Abort reason for the Gemini reasoning-header runaway interrupt. Surfaced on the
+ *  discarded assistant turn only; never reaches the model. */
+const GEMINI_HEADER_INTERRUPT_REASON = "Interrupted: emit a tool call instead of more planning";
+/** `customType` for the hidden tool-call reminder injected after the interrupt. */
+const GEMINI_TOOL_REMINDER_TYPE = "gemini-tool-call-reminder";
+/** `customType` for the hidden redirect notice injected into a turn retried after a
+ *  thinking/response loop. Steers the model off the repeated content; never displayed. */
+const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
+const TOOL_CALL_LOOP_REDIRECT_TYPE = "tool-call-loop-redirect";
+
+function customMessageContentText(content: string | (TextContent | ImageContent)[]): string {
+	if (typeof content === "string") return content;
+	const parts: string[] = [];
+	for (const part of content) {
+		if (part.type === "text") parts.push(part.text);
+	}
+	return parts.join("\n");
+}
+
+function stringProperty(value: object, key: string): string | undefined {
+	const field = Object.getOwnPropertyDescriptor(value, key)?.value;
+	return typeof field === "string" ? field : undefined;
+}
+
+function reportFromRewindReportContent(content: string): string {
+	const marker = "\nReport:\n";
+	const index = content.lastIndexOf(marker);
+	const report = index >= 0 ? content.slice(index + marker.length) : content;
+	return report.trim();
+}
+
+type SemanticCheckpointToolName = "checkpoint" | "rewind";
+
+type SemanticToolResult = {
+	toolName: SemanticCheckpointToolName;
+	details?: unknown;
+};
+
+/**
+ * Normalize checkpoint/rewind results across native calls and `write xd://`
+ * dispatches. Xdev keeps the wrapped tool's result details under `xdev.inner`,
+ * while direct calls put them on the result itself.
+ */
+function semanticToolResult(toolName: string | undefined, result: unknown): SemanticToolResult | undefined {
+	if (toolName === "checkpoint" || toolName === "rewind") {
+		const details = result && typeof result === "object" && "details" in result ? result.details : undefined;
+		return { toolName, details };
+	}
+	const dispatch = writeDeviceDispatch(toolName ?? "", result);
+	if (dispatch?.mode !== "execute" || (dispatch.tool !== "checkpoint" && dispatch.tool !== "rewind")) {
+		return undefined;
+	}
+	return { toolName: dispatch.tool, details: dispatch.inner };
+}
+
+function isTodoPhase(value: unknown): value is TodoPhase {
+	if (!isRecord(value) || typeof value.name !== "string" || !Array.isArray(value.tasks)) return false;
+	return value.tasks.every(
+		task =>
+			isRecord(task) &&
+			typeof task.content === "string" &&
+			(task.status === "pending" ||
+				task.status === "in_progress" ||
+				task.status === "completed" ||
+				task.status === "abandoned"),
+	);
+}
+
+function completedRewindFromEntry(entry: SessionEntry): CompletedRewindState | undefined {
+	if (entry.type !== "custom_message" || entry.customType !== "rewind-report") return undefined;
+	const details = entry.details;
+	if (!details || typeof details !== "object") return undefined;
+	const startedAt = stringProperty(details, "startedAt");
+	const rewoundAt = stringProperty(details, "rewoundAt");
+	if (!startedAt || !rewoundAt) return undefined;
+	const report =
+		stringProperty(details, "report")?.trim() ||
+		reportFromRewindReportContent(customMessageContentText(entry.content));
+	return report.length > 0 ? { report, startedAt, rewoundAt } : undefined;
+}
+function isSuccessfulCheckpointEntry(
+	entry: SessionEntry,
+): entry is SessionEntry & { type: "message"; message: Extract<AgentMessage, { role: "toolResult" }> } {
+	if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.isError === true) {
+		return false;
+	}
+	return semanticToolResult(entry.message.toolName, entry.message)?.toolName === "checkpoint";
+}
+
+function checkpointStartedAtFromEntry(entry: SessionEntry): string | undefined {
+	if (!isSuccessfulCheckpointEntry(entry)) return undefined;
+	const details = semanticToolResult(entry.message.toolName, entry.message)?.details;
+	if (details && typeof details === "object") {
+		const startedAt = stringProperty(details, "startedAt");
+		if (startedAt) return startedAt;
+	}
+	return entry.timestamp;
+}
+
+// A side-channel assistant response is signed for the hidden prompt/history that
+// produced it. If we persist that response under a different user turn, native
+// replay anchors become invalid; keep only visible, non-cryptographic content.
+function sanitizeAssistantForReparentedHistory(message: AssistantMessage): AssistantMessage {
+	const content: AssistantMessage["content"] = [];
+	for (const block of message.content) {
+		if (block.type === "redactedThinking") continue;
+		if (block.type === "thinking") {
+			content.push({ type: "thinking", thinking: block.thinking });
+			continue;
+		}
+		content.push(block);
+	}
+	return { ...message, content, providerPayload: undefined };
+}
+
+/** Session-specific events that extend the core AgentEvent */
+export type AgentSessionEvent =
+	| AgentEvent
+	| {
+			type: "auto_compaction_start";
+			reason: "threshold" | "overflow" | "idle" | "incomplete";
+			action: "context-full" | "handoff" | "shake" | "snapcompact";
+	  }
+	| {
+			type: "auto_compaction_end";
+			action: "context-full" | "handoff" | "shake" | "snapcompact";
+			result: CompactionResult | undefined;
+			aborted: boolean;
+			willRetry: boolean;
+			errorMessage?: string;
+			/** True when compaction was skipped for a benign reason (no model, no candidates, nothing to compact). */
+			skipped?: boolean;
+	  }
+	| {
+			type: "auto_retry_start";
+			attempt: number;
+			maxAttempts: number;
+			delayMs: number;
+			errorMessage: string;
+			errorId?: number;
+	  }
+	| {
+			type: "auto_retry_end";
+			success: boolean;
+			attempt: number;
+			finalError?: string;
+			recoveredErrors?: RecoveredRetryError[];
+	  }
+	| { type: "retry_fallback_applied"; from: string; to: string; role: string }
+	| { type: "retry_fallback_succeeded"; model: string; role: string }
+	| { type: "ttsr_triggered"; rules: Rule[] }
+	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
+	| { type: "todo_auto_clear" }
+	| { type: "irc_message"; message: CustomMessage }
+	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
+	| {
+			type: "thinking_level_changed";
+			thinkingLevel: ThinkingLevel | undefined;
+			/** The user-configured selector when it differs from the effective level (e.g. `auto`). */
+			configured?: ConfiguredThinkingLevel;
+			/** The level `auto` resolved to this turn, once classified. */
+			resolved?: Effort;
+	  }
+	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
+/** Listener function for agent session events */
+export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
+
+const UNEXPECTED_STOP_MAX_RETRIES = 3;
+const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
+const EMPTY_STOP_MAX_RETRIES = 3;
+const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;
+/**
+ * Budget for callers on the user-visible `/quit` / `/exit` shutdown path that
+ * want to cap how long they wait for `MnemopiSessionState.dispose()` to finish
+ * its consolidate pass. Consolidate fires fresh LLM fact extractions, each a
+ * 1–3 s round-trip, so interactive shutdown passes this budget to keep the
+ * UI responsive. Callers that keep the process/session host alive must omit it
+ * so dispose still awaits the full consolidate-then-close pipeline.
+ */
+export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
+
+export interface AgentSessionDisposeOptions {
+	mnemopiConsolidateTimeoutMs?: number;
+	/**
+	 * Postmortem reason that triggered this dispose (signal/fatal teardown
+	 * paths). When set, the persisted `session_exit` diagnostic records it
+	 * instead of the generic `"dispose"` used for normal programmatic disposal
+	 * (`/quit`, test teardown, subagent completion).
+	 */
+	reason?: postmortem.Reason;
+}
+
+type CompactionCheckResult = Readonly<{
+	deferredHandoff: boolean;
+	continuationScheduled: boolean;
+	automaticContinuationBlocked?: boolean;
+	historyRewritten?: boolean;
+}>;
+
+const COMPACTION_CHECK_NONE: CompactionCheckResult = {
+	deferredHandoff: false,
+	continuationScheduled: false,
+};
+const COMPACTION_CHECK_DEFERRED_HANDOFF: CompactionCheckResult = {
+	deferredHandoff: true,
+	continuationScheduled: false,
+};
+const COMPACTION_CHECK_CONTINUATION: CompactionCheckResult = {
+	deferredHandoff: false,
+	continuationScheduled: true,
+};
+const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
+	deferredHandoff: false,
+	continuationScheduled: false,
+	automaticContinuationBlocked: true,
+};
+
+/**
+ * User-facing notice for a compaction dead end: maintenance freed too little
+ * to retry safely. `remedies` names the recovery actions left on the emitting
+ * path — by the time the post-pass dead end fires, the tiered rescue has
+ * already attempted both elide and image-drop automatically.
+ */
+function compactionDeadEndWarning(remedies: string): string {
+	return (
+		"Compaction freed too little context to make progress — pausing automatic maintenance to avoid a compaction loop. " +
+		`The most recent turn alone is too large to reduce further; ${remedies} or switch to a larger-context model.`
+	);
+}
+
+function createCodexCompactionContext(options: {
+	trigger: CodexCompactionContext["trigger"];
+	reason: CodexCompactionContext["reason"];
+	phase: CodexCompactionContext["phase"];
+}): CodexCompactionContext {
+	return {
+		operationId: crypto.randomUUID(),
+		trigger: options.trigger,
+		reason: options.reason,
+		phase: options.phase,
+		strategy: "memento",
+	};
+}
+
+/**
+ * Per-turn prune cache window. A tool result whose all-message suffix exceeds
+ * this is in the warm, already-sent prompt-cache prefix: re-writing it costs the
+ * cacheWrite premium on the whole suffix. Per-turn passes only reclaim inside
+ * this tail (matches the supersede pass's default `suffixTokenLimit`); deeper
+ * stale/age victims are left to compaction/shake, which rebuild the cache anyway.
+ */
+const PRUNE_CACHE_WARM_SUFFIX_TOKENS = 8_000;
+
+/**
+ * Idle gap after which the supersede pass may flush the whole sent region (the
+ * provider cache is cold, so re-writing it is free). MUST exceed the maximum
+ * Anthropic prompt-cache TTL — "long" retention (the OAuth default) is 1h — or a
+ * still-warm prefix is busted by the flush. 90 min leaves margin over the 1h TTL.
+ */
+const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
+export type CommandMetadataChangedListener = () => void | Promise<void>;
+export type AsyncJobSnapshotItem = Pick<AsyncJob, "id" | "type" | "status" | "label" | "startTime">;
+
+const RETRY_BACKOFF_JITTER_RATIO = 0.25;
+/**
+ * Hysteresis band for the post-maintenance "did we actually create headroom?"
+ * check shared by the shake tail and the context-full / snapcompact tail. A
+ * pass counts as having resolved threshold pressure only when residual context
+ * lands at or below `COMPACTION_RECOVERY_BAND × threshold`. Re-checking against
+ * the raw threshold lets a pass keep reclaiming a trickle of the previous
+ * turn's output and land just under the line every turn, sustaining the
+ * auto-continue dead loop reported in #2275; the same band stops the
+ * context-full / snapcompact tail from re-firing on a history whose single
+ * most-recent kept turn already exceeds the threshold (the snapcompact thrash).
+ */
+const COMPACTION_RECOVERY_BAND = 0.8;
+
+function calculateRetryBackoffDelayMs(baseDelayMs: number, attempt: number): number {
+	const cappedDelayMs = Math.min(Math.max(0, baseDelayMs) * 2 ** Math.max(0, attempt - 1), RETRY_BACKOFF_MAX_DELAY_MS);
+	const jitter = 1 - Math.random() * RETRY_BACKOFF_JITTER_RATIO;
+	return cappedDelayMs * jitter;
+}
+
+/**
+ * Slack added past a sibling credential's block expiry before retrying, so
+ * the next getApiKey lands after the block has actually lapsed.
+ */
+const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
+const NON_WHITESPACE_RE = /\S/;
+
+function hasNonWhitespace(value: string): boolean {
+	return NON_WHITESPACE_RE.test(value);
+}
+
+export interface AsyncJobSnapshot {
+	running: AsyncJobSnapshotItem[];
+	recent: AsyncJobSnapshotItem[];
+	delivery: AsyncJobDeliveryState;
+}
+
+export type { ShakeMode, ShakeResult };
+/**
+ * Prewalk: switches an active session one-way from its starting model to
+ * a fast/cheap `target` at the first completed turn that runs an edit/write
+ * tool once the todo list exists. A hidden plan nudge asks the starting
+ * model to write a plan, initialize its todo list from it, and start; the
+ * todo call opens the trigger gate (it never fires the switch itself), so
+ * the starting model always begins the implementation. A hidden
+ * checklist nudge asks the target model to verify its work before
+ * finishing. Both are always on — this is the one mechanism that won out
+ * over turn-count and ungated variants in testing.
+ */
+export interface Prewalk {
+	target: Model;
+	thinkingLevel?: ConfiguredThinkingLevel;
+}
+
+/**
+ * PlanYolo: forces the session into read-only plan mode at start, then
+ * auto-approves the plan the instant the model calls `resolve({ action:
+ * "apply" })` for it — no interactive review — and switches to a fast/cheap
+ * `target` model to implement it. The headless counterpart to interactive
+ * plan mode's "Approve and execute", for print/non-interactive runs where
+ * there is no one to click Approve.
+ */
+export interface PlanYolo {
+	target: Model;
+	thinkingLevel?: ConfiguredThinkingLevel;
+}
+
+// ============================================================================
+// Types
+// ============================================================================
+
+export interface AgentSessionConfig {
+	agent: Agent;
+	sessionManager: SessionManager;
+	settings: Settings;
+	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
+	autoApprove?: boolean;
+	/** Models to cycle through with Ctrl+P (from --models flag) */
+	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** Initial session thinking selector. */
+	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
+	prewalk?: Prewalk;
+	/** Force read-only plan mode at start, auto-approve on the model's first
+	 *  plan proposal (`write xd://propose`), then switch to the target to implement. */
+	planYolo?: PlanYolo;
+
+	/** Initial per-family service tiers (OpenAI / Anthropic / Google) for the live session. */
+	serviceTierByFamily?: ServiceTierByFamily;
+	/** Prompt templates for expansion */
+	promptTemplates?: PromptTemplate[];
+	/** File-based slash commands for expansion */
+	slashCommands?: FileSlashCommand[];
+	/** Extension runner (created in main.ts with wrapped tools) */
+	extensionRunner?: ExtensionRunner;
+	/** Loaded skills (already discovered by SDK) */
+	skills?: Skill[];
+	/** Skill loading warnings (already captured by SDK) */
+	skillWarnings?: SkillWarning[];
+	/** Whether runtime reloads may rediscover disk-backed skills for this session. */
+	skillsReloadable?: boolean;
+	/** Custom commands (TypeScript slash commands) */
+	customCommands?: LoadedCustomCommand[];
+	skillsSettings?: SkillsSettings;
+	/** Model registry for API key resolution and model discovery */
+	modelRegistry: ModelRegistry;
+	/** Tool registry for LSP and settings */
+	toolRegistry?: Map<string, AgentTool>;
+	/** Creates the tools registered only while `/vibe` mode is active. */
+	createVibeTools?: () => AgentTool[];
+	/** Tool names whose current registry entry is still the built-in implementation. */
+	builtInToolNames?: Iterable<string>;
+	/** Update tool-session predicates that render guidance from the live active tool set. */
+	setActiveToolNames?: (names: Iterable<string>) => void;
+	/** Register the write transport lazily when runtime xdev mounts first need it. */
+	ensureWriteRegistered?: () => Promise<boolean>;
+	/** Current session pre-LLM message transform pipeline */
+	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
+	/**
+	 * Per-request transform applied after `convertToLlm` and before the
+	 * provider call. Used for snapcompact, secret obfuscation, and image
+	 * clamping. When supplied via {@link createAgentSession}, the advisor agent
+	 * inherits this so its requests undergo the same shaping as the main turn.
+	 */
+	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
+	/**
+	 * Stream wrapper passed to side-channel requests (`/btw`, `/omfg`, IRC
+	 * auto-replies, and handoff generation) so they apply the same provider
+	 * shaping and host-level request wrappers as normal agent turns. Defaults
+	 * to plain `streamSimple` when omitted.
+	 */
+	sideStreamFn?: StreamFn;
+	/**
+	 * Stream wrapper passed to the advisor agent so its requests apply the
+	 * session's `providers.openrouterVariant`, `providers.antigravityEndpoint`,
+	 * `providers.maxInFlightRequests`, and `model.loopGuard.*` settings —
+	 * keeping OpenRouter sticky-routing / response caching consistent with the
+	 * main agent. Defaults to plain `streamSimple` when omitted.
+	 */
+	advisorStreamFn?: StreamFn;
+	/** Hint that OpenAI Codex requests should prefer websocket transport when supported. */
+	preferWebsockets?: boolean;
+	/** Provider payload hook used by the active session request path */
+	onPayload?: SimpleStreamOptions["onPayload"];
+	/** Provider response hook used by the active session request path */
+	onResponse?: SimpleStreamOptions["onResponse"];
+	/** Raw SSE hook used by the active session request path */
+	onSseEvent?: SimpleStreamOptions["onSseEvent"];
+	/** Per-session raw SSE diagnostic buffer */
+	rawSseDebugBuffer?: RawSseDebugBuffer;
+	/** Current session message-to-LLM conversion pipeline */
+	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+	/** System prompt builder that can consider tool availability. Returns ordered provider-facing blocks. */
+	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
+	/** Local calendar date provider used by prompt-cache invalidation. Defaults to the host local date. */
+	getLocalCalendarDate?: () => string;
+	/** Entries of tools mounted under `xd://` (name + one-line summary), for /tools display. */
+	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
+	/** Session-owned `xd://` device registry; reconciled as the active tool set changes. */
+	xdevRegistry?: XdevRegistry;
+	/** Discoverable tools mounted under `xd://` in the initial enabled set (startup partition in `sdk.ts`). */
+	initialMountedXdevToolNames?: string[];
+	/** Explicit/effective names pinned top-level during runtime repartitioning. */
+	presentationPinnedToolNames?: ReadonlySet<string>;
+	/**
+	 * Optional accessor for live MCP server instructions. Read by the session's
+	 * `rebuildSystemPrompt`-skip optimization to detect server-side instruction
+	 * changes (e.g. an MCP server upgrade) that would otherwise pass the tool-set
+	 * signature comparison and silently keep a stale prompt cached.
+	 */
+	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/** TTSR manager for time-traveling stream rules */
+	ttsrManager?: TtsrManager;
+	/** Secret obfuscator for deobfuscating streaming edit content */
+	obfuscator?: SecretObfuscator;
+	/** Inherited eval executor session id from a parent agent. */
+	parentEvalSessionId?: string;
+	/** Logical owner for retained eval kernels created by this session. */
+	evalKernelOwnerId?: string;
+	/**
+	 * AsyncJobManager that this session installed as the process-global instance.
+	 * Only set for top-level sessions; subagents inherit the parent's manager and
+	 * **MUST NOT** dispose it on their own teardown.
+	 */
+	ownedAsyncJobManager?: AsyncJobManager;
+	/**
+	 * AsyncJobManager reachable by this session for scoped job actions.
+	 *
+	 * Top-level owners receive their own manager, subagents receive the inherited
+	 * parent manager, and secondary in-process top-level sessions receive
+	 * `undefined` so job snapshots and ACP drains cannot observe the primary's
+	 * state.
+	 */
+	asyncJobManager?: AsyncJobManager;
+	/** Agent identity (registry id like "Main" or "Alice") used for IRC routing. */
+	agentId?: string;
+	/** Whether this session is the top-level agent or a subagent. Drives eager-task
+	 *  prelude gating so a top-level session created with a custom `agentId` still
+	 *  receives the always-mode reminder. Defaults to "main". */
+	agentKind?: "main" | "sub";
+	/**
+	 * Override the provider-facing session ID for all API requests from this session.
+	 * When absent, `sessionManager.getSessionId()` is used. Needed when benchmark or
+	 * SDK callers issue probes / prewarming with an explicit `--provider-session-id`
+	 * so that credential sticky selection is consistent with the session's streaming calls.
+	 */
+	providerSessionId?: string;
+	/** Marks `agent.promptCacheKey` as fork-inherited so incompatible route changes can clear it. */
+	providerPromptCacheKeySource?: "explicit" | "fork";
+	/**
+	 * Full advisor toolset, pre-built in `createAgentSession` against a distinct,
+	 * advisor-scoped `ToolSession` (its own `-advisor` session/agent id) so the
+	 * advisor's tool state stays isolated from the primary. The advisor is a full
+	 * agent; its config `tools` selects a subset (default read/grep/glob). Undefined
+	 * when the advisor is disabled.
+	 */
+	advisorTools?: AgentTool[];
+	/** Preloaded watchdog prompt content for the advisor. */
+	advisorWatchdogPrompt?: string;
+	/** Preloaded YAML top-level `instructions` shared baseline, kept separate from
+	 *  `advisorWatchdogPrompt` so `/advisor configure` can swap it live. */
+	advisorSharedInstructions?: string;
+	/**
+	 * Preloaded project context files (AGENTS.md, etc.) rendered as a system-prompt
+	 * block for the advisor — the same standing instructions the primary agent
+	 * receives, so the reviewer holds the agent to them.
+	 */
+	advisorContextPrompt?: string;
+	/**
+	 * Advisors discovered from `WATCHDOG.yml`. Empty/undefined runs a single
+	 * legacy advisor on the `advisor` role (byte-for-byte the pre-config path).
+	 */
+	advisorConfigs?: AdvisorConfig[];
+	/**
+	 * Strip tool descriptions from provider-bound tool specs on side requests
+	 * (handoff). Must match the session-start value used to build the system
+	 * prompt so inline descriptors are not also sent through provider schemas.
+	 */
+	pruneToolDescriptions?: boolean;
+	/**
+	 * Disconnect this session's OWNED MCP manager on dispose. Provided only when
+	 * the session created the manager (top-level sessions); subagents reuse a
+	 * parent's manager via `options.mcpManager` and omit this so a child's
+	 * teardown never tears down the shared servers.
+	 */
+	disconnectOwnedMcpManager?: () => Promise<void>;
+	/**
+	 * Override the bundled system prompt used by automatic session-title
+	 * generation paths (initial title + replan refresh). Source-of-truth is
+	 * `TITLE_SYSTEM.md` discovered via {@link discoverTitleSystemPromptFile} and
+	 * resolved through {@link resolvePromptInput}; refresh after a `/move`-style
+	 * cwd change via {@link AgentSession.setTitleSystemPrompt}.
+	 */
+	titleSystemPrompt?: string;
+}
+
+/** Options for AgentSession.prompt() */
+export interface PromptOptions {
+	/** Whether to expand file-based prompt templates (default: true) */
+	expandPromptTemplates?: boolean;
+	/** Image attachments */
+	images?: ImageContent[];
+	/** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). */
+	streamingBehavior?: "steer" | "followUp";
+	/** Optional tool choice override for the next LLM call. */
+	toolChoice?: ToolChoice;
+	/** Send as developer/system message instead of user. Providers that support it use the developer role; others fall back to user. */
+	synthetic?: boolean;
+	/** Marks this prompt as a deliberate user action (typed message, `.`/`c`
+	 *  continue). Clears advisor auto-resume suppression that a user interrupt set.
+	 *  Defaults to `!synthetic`; manual-continue is synthetic yet user-initiated, so
+	 *  it sets this explicitly. Agent-initiated synthetic prompts (auto-continue,
+	 *  plan re-prime, reminders) leave it unset and keep suppression latched. */
+	userInitiated?: boolean;
+	/** Explicit billing/initiator attribution for the prompt. Defaults to user prompts as `user` and synthetic prompts as `agent`. */
+	attribution?: MessageAttribution;
+	/** Skip pre-send compaction checks for this prompt (internal use for maintenance flows). */
+	skipCompactionCheck?: boolean;
+}
+
+/** Options for AgentSession.followUp() */
+export interface FollowUpOptions {
+	/** Enqueue as a hidden developer message (agent-attributed by default) instead of a user follow-up. */
+	synthetic?: boolean;
+	/** Whether to expand file-based prompt templates (default: true). */
+	expandPromptTemplates?: boolean;
+	/** Explicit billing/initiator attribution. Defaults to `agent` for synthetic follow-ups. */
+	attribution?: MessageAttribution;
+}
+
+/** Result from a handoff operation. */
+export interface HandoffResult {
+	document: string;
+	savedPath?: string;
+}
+
+export interface SessionHandoffOptions {
+	autoTriggered?: boolean;
+	signal?: AbortSignal;
+	onSwitchCancelled?: () => void;
+}
+
+/** Result from cycleModel() */
+export interface ModelCycleResult {
+	model: Model;
+	thinkingLevel: ThinkingLevel | undefined;
+	/** Whether cycling through scoped models (--models flag) or all available */
+	isScoped: boolean;
+}
+
+/** Result from cycleRoleModels() */
+export interface RoleModelCycleResult {
+	model?: Model;
+	thinkingLevel?: ThinkingLevel | undefined;
+	role: string;
+	/** Open the session model picker instead of applying a concrete model. */
+	openPicker?: boolean;
+}
+
+/** A configured role resolved to a concrete model, used by role cycling and
+ *  the plan-approval model slider. */
+export interface ResolvedRoleModel {
+	role: string;
+	model: Model;
+	thinkingLevel?: ConfiguredThinkingLevel;
+	explicitThinkingLevel: boolean;
+}
+
+/** The set of resolvable role models plus the index of the currently active
+ *  one within {@link ResolvedRoleModel.role} order. */
+export interface RoleModelCycle {
+	models: ResolvedRoleModel[];
+	currentIndex: number;
+}
+
+export interface ContextUsageBreakdown {
+	contextWindow: number;
+	anchored: boolean;
+	usedTokens: number;
+	systemPromptTokens: number;
+	systemToolsTokens: number;
+	systemContextTokens: number;
+	skillsTokens: number;
+	messagesTokens: number;
+}
+
+/** Session statistics for /session command */
+export interface SessionStats {
+	sessionFile: string | undefined;
+	sessionId: string;
+	userMessages: number;
+	assistantMessages: number;
+	toolCalls: number;
+	toolResults: number;
+	totalMessages: number;
+	tokens: {
+		input: number;
+		output: number;
+		reasoning: number;
+		cacheRead: number;
+		cacheWrite: number;
+		total: number;
+	};
+	premiumRequests: number;
+	cost: number;
+	contextUsage?: ContextUsage;
+}
+
+/** Advisor statistics for /advisor status command. */
+export interface AdvisorStats {
+	configured: boolean;
+	active: boolean;
+	model?: Model;
+	contextWindow: number;
+	contextTokens: number;
+	tokens: {
+		input: number;
+		output: number;
+		reasoning: number;
+		cacheRead: number;
+		cacheWrite: number;
+		total: number;
+	};
+	cost: number;
+	messages: {
+		user: number;
+		assistant: number;
+		total: number;
+	};
+	/** Per-advisor breakdown; one entry per active advisor (single-advisor sessions have one). */
+	advisors: PerAdvisorStat[];
+}
+
+/** One advisor's slice of {@link AdvisorStats}. Active advisors carry full
+ *  token/cost data; disabled/no-model/quota-exhausted advisors appear with
+ *  just `name` + `status` so the status line can render a dot for every
+ *  configured advisor. */
+export interface PerAdvisorStat {
+	name: string;
+	status: AdvisorRuntimeStatus;
+	model?: Model;
+	contextWindow: number;
+	contextTokens: number;
+	tokens: AdvisorStats["tokens"];
+	cost: number;
+	messages: AdvisorStats["messages"];
+	sessionId?: string;
+}
+
+/**
+ * One live advisor instance: its own agent/runtime/tools/recorder plus a
+ * per-advisor emission guard and identity. The session holds an array of these;
+ * primary-scoped state (turn counters, interrupt latches, the shared yield
+ * channel) stays on the session.
+ */
+interface AdvisorRetryFallbackState {
+	role: string;
+	originalSelector: string;
+	originalThinkingLevel: ThinkingLevel;
+	lastAppliedThinkingLevel: ThinkingLevel;
+}
+
+interface ActiveAdvisor {
+	/** Display name from config ("default" for the legacy no-YAML advisor). */
+	name: string;
+	/** Slug for the transcript filename/session id; "" → `__advisor.jsonl`. */
+	slug: string;
+	agent: Agent;
+	runtime: AdvisorRuntime;
+	adviseTool: AdviseTool;
+	emissionGuard: AdvisorEmissionGuard;
+	recorder: AdvisorTranscriptRecorder;
+	/** Latest recorder close, awaited by dispose() so the final turn lands on disk. */
+	recorderClosed: Promise<void>;
+	/** Unsubscribe for the advisor agent's event stream feeding the recorder. */
+	agentUnsubscribe?: () => void;
+	model: Model;
+	thinkingLevel: ThinkingLevel;
+	/** Provider credential/session identity retained across advisor model switches. */
+	providerSessionId: string | undefined;
+	/** Active chain state retained until the configured primary can be restored. */
+	retryFallback?: AdvisorRetryFallbackState;
+	/** A switched advisor model has not yet completed its first successful turn. */
+	retryFallbackPendingSuccess: boolean;
+	/** Stable key for the resolved runtime inputs that require a rebuild to change. */
+	signature: string;
+}
+
+/** Runtime-only advisor compaction metadata. It never enters the model-facing summary text. */
+interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
+	firstKeptEntryId?: string;
+	/** First message index eligible to anchor provider usage after this compaction. */
+	advisorUsageAnchorStartIndex?: number;
+}
+
+/** Resolved advisor config ready to instantiate as an {@link ActiveAdvisor}. */
+interface AdvisorRuntimeDescriptor {
+	config: AdvisorConfig;
+	name: string;
+	slug: string;
+	model: Model;
+	thinkingLevel: ThinkingLevel;
+	signature: string;
+}
+
+export interface FreshSessionResult {
+	previousSessionId: string;
+	sessionId: string;
+	closedProviderSessions: number;
+}
 
 /** Internal marker for hook messages queued through the agent loop */
 // ============================================================================
