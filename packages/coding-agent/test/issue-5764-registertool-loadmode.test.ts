@@ -38,6 +38,9 @@ describe("issue #5764: registerTool loadMode default", () => {
 		// invariant must still keep read/write top-level.
 		expect(isMountableUnderXdev({ name: "read", loadMode: "discoverable" })).toBe(false);
 		expect(isMountableUnderXdev({ name: "write", loadMode: "discoverable" })).toBe(false);
+		// Prompted-by-name tools stay top-level even when discoverable.
+		expect(isMountableUnderXdev({ name: "inspect_image", loadMode: "discoverable" })).toBe(false);
+		expect(isMountableUnderXdev({ name: "web_search", loadMode: "discoverable" })).toBe(false);
 		// A genuinely discoverable tool still mounts.
 		expect(isMountableUnderXdev({ name: "lsp", loadMode: "discoverable" })).toBe(true);
 	});

@@ -11,8 +11,18 @@ import type {
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { formatBytes, isRecord, logger, readImageMetadata, SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import {
+	DOCUMENT_EXT_MIME,
+	formatBytes,
+	isRecord,
+	logger,
+	parsePdfMagic,
+	readImageMetadata,
+	SUPPORTED_IMAGE_MIME_TYPES,
+} from "@oh-my-pi/pi-utils";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize";
+import { convertFileWithMarkit } from "./markit";
 
 export const MAX_IMAGE_INPUT_BYTES = 20 * 1024 * 1024;
 export const SUPPORTED_INPUT_IMAGE_MIME_TYPES = SUPPORTED_IMAGE_MIME_TYPES;
@@ -139,6 +149,134 @@ async function normalizeNativeResponsesHistoryPayload(
 		items?.push(normalizedItem);
 	}
 	return items ? { ...payload, items } : payload;
+}
+
+/** The mime types vision APIs accept natively. Others need conversion to PNG. */
+const NATIVE_VISION_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+export type InspectFileKind = "image" | "pdf" | "document" | "text" | "binary";
+
+export interface LoadedInspectFile {
+	resolvedPath: string;
+	kind: InspectFileKind;
+	/** Set when kind is "image" — base64-encoded PNG for vision model submission. */
+	imageData?: string;
+	imageMimeType?: string;
+	/** Set when kind is "pdf" | "document" | "text" — markdown or plain text content. */
+	textContent?: string;
+	/** Set when kind is "binary" — a descriptive hex-dump snippet. */
+	binaryNote?: string;
+	/** Total bytes read from disk. */
+	bytes: number;
+}
+
+/**
+ * Load any file for inspection, routing by type:
+ * - images => base64 PNG for vision model
+ * - pdf => markit conversion; falls back to vision if text is sparse
+ * - documents (docx, pptx, etc.) => markit conversion
+ * - text => read directly
+ * - binary => hex preview
+ */
+export async function loadFileForInspect(
+	rawPath: string,
+	cwd: string,
+	maxBytes: number = MAX_IMAGE_INPUT_BYTES,
+): Promise<LoadedInspectFile> {
+	const resolvedPath = resolveReadPath(rawPath, cwd);
+	const stat = await Bun.file(resolvedPath).stat();
+	if (stat.size > maxBytes) {
+		throw new ImageInputTooLargeError(stat.size, maxBytes);
+	}
+
+	const buffer = await fs.readFile(resolvedPath);
+	if (buffer.byteLength > maxBytes) {
+		throw new ImageInputTooLargeError(buffer.byteLength, maxBytes);
+	}
+
+	// Try image first — most specific detection.
+	const imageMeta = await readImageMetadata(resolvedPath);
+	if (imageMeta) {
+		const pngData = await convertToPngDataUrl(buffer);
+		if (pngData) {
+			return {
+				resolvedPath,
+				kind: "image",
+				imageData: pngData,
+				imageMimeType: "image/png",
+				bytes: buffer.byteLength,
+			};
+		}
+	}
+
+	// PDF detection via magic bytes.
+	const ext = path.extname(resolvedPath).toLowerCase();
+	const isPdfByExt = ext === ".pdf";
+	const pdfHeader = new Uint8Array(buffer.buffer, buffer.byteOffset, Math.min(buffer.byteLength, 512));
+	const isPdfMagic = buffer.byteLength >= 5 && parsePdfMagic(pdfHeader);
+
+	if (isPdfByExt || isPdfMagic) {
+		// Try markit text extraction first.
+		const markitResult = await convertFileWithMarkit(resolvedPath);
+		if (markitResult.ok && markitResult.content.trim().length >= 200) {
+			return {
+				resolvedPath,
+				kind: "pdf",
+				textContent: markitResult.content,
+				bytes: buffer.byteLength,
+			};
+		}
+		// Sparse text — fall through to image-based analysis.
+		return {
+			resolvedPath,
+			kind: "pdf",
+			textContent: markitResult.content || undefined,
+			bytes: buffer.byteLength,
+		};
+	}
+
+	// Document formats (docx, pptx, xlsx, etc.) — use markit.
+	if (DOCUMENT_EXT_MIME[ext]) {
+		const markitResult = await convertFileWithMarkit(resolvedPath);
+		return {
+			resolvedPath,
+			kind: "document",
+			textContent: markitResult.ok
+				? markitResult.content
+				: `[Could not extract text: ${markitResult.error ?? "unknown error"}]`,
+			bytes: buffer.byteLength,
+		};
+	}
+
+	// Try UTF-8 / ASCII text.
+	try {
+		const decoder = new TextDecoder("utf-8", { fatal: true });
+		const text = decoder.decode(buffer);
+		// Reasonable text check: at least 50% printable or has newlines.
+		const sample = text.slice(0, 4096);
+		const printable = [...sample].filter(c => c >= " " || c === "\n" || c === "\r" || c === "\t").length;
+		if (printable / Math.min(text.length, 4096) > 0.5) {
+			return {
+				resolvedPath,
+				kind: "text",
+				textContent: text,
+				bytes: buffer.byteLength,
+			};
+		}
+	} catch {
+		// Not valid UTF-8 — keep going.
+	}
+
+	// Binary file — produce a hex preview.
+	const previewBytes = buffer.subarray(0, Math.min(buffer.byteLength, 256));
+	const hex = [...previewBytes].map(b => b.toString(16).padStart(2, "0")).join(" ");
+
+	return {
+		resolvedPath,
+		kind: "binary",
+		binaryNote: `Binary file (${formatBytes(buffer.byteLength)}). First ${previewBytes.byteLength} bytes hex: ${hex}`,
+		bytes: buffer.byteLength,
+	};
 }
 
 /**
@@ -270,11 +408,23 @@ export async function convertImageToPng(image: ImageContent): Promise<ImageConte
 }
 
 export async function ensureSupportedImageInput(image: ImageContent): Promise<ImageContent | null> {
-	if (SUPPORTED_INPUT_IMAGE_MIME_TYPES.has(image.mimeType)) {
+	if (NATIVE_VISION_MIME_TYPES.has(image.mimeType)) {
 		return image;
 	}
 	try {
 		return await convertImageToPng(image);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Convert an image buffer to PNG base64 using Bun's native decoder.
+ * Handles BMP, TIFF, HEIC, ICO and other formats Bun.Image supports.
+ */
+async function convertToPngDataUrl(buffer: Buffer): Promise<string | null> {
+	try {
+		return await new Bun.Image(buffer).png().toBase64();
 	} catch {
 		return null;
 	}

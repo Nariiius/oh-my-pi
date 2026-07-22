@@ -722,6 +722,7 @@ const streamOpenAICompletionsOnce = (
 						// bounds every attempt and backoff sleep — retries cannot
 						// extend the deadline.
 						onSseEvent: rawSseObserver,
+						...(requestTimeoutMs !== undefined && { maxRetries: 0 }),
 					});
 					await notifyProviderResponse(options, response, model, requestId);
 					return events;

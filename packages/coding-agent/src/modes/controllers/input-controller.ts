@@ -1,3 +1,5 @@
+import * as fsSync from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -15,6 +17,12 @@ import { TreeSelectorComponent } from "../../modes/components/tree-selector";
 import { chipLabel, compactImageMarkers, shiftImageMarkers } from "../../modes/composer-attachments";
 import { expandEmoticons } from "../../modes/emoji-autocomplete";
 import { materializeImageReferenceLinks, setCachedImageDimensions } from "../../modes/image-references";
+import {
+	filterAndRenumberReferencedImages,
+	materializeImageReferenceLinks,
+	materializeImageReferenceLinksSync,
+	setCachedImageDimensions,
+} from "../../modes/image-references";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
 import { parseQueueShorthand, splitQueuedMessages } from "../../modes/queue-input";
 import { buildSkillCommandPrompt, isKnownSkillCommand } from "../../modes/skill-command";
@@ -28,6 +36,7 @@ import { tinyTitleClient } from "../../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { vocalizer } from "../../tts/vocalizer";
+import { fileHyperlink } from "../../tui/hyperlink";
 import {
 	copyToClipboard,
 	readImageFromClipboard,
@@ -502,6 +511,7 @@ export class InputController {
 		);
 		this.ctx.editor.onPasteImage = () => this.handleImagePaste();
 		this.ctx.editor.onPasteImagePath = path => this.handleImagePathPaste(path);
+		this.ctx.editor.onPasteFilePath = path => this.handleFilePaste(path);
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.pasteTextRaw",
 			this.ctx.keybindings.getKeys("app.clipboard.pasteTextRaw"),
@@ -742,6 +752,19 @@ export class InputController {
 				this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
+
+			// Filter to only images still referenced in the text (user may have deleted [Image #N]
+			// or `[Image #N, WxH]`). Then renumber markers so gaps collapse (e.g. [Image #3]
+			// becomes [Image #2] after #2 is deleted), preserving any dimension metadata tail.
+			if (text && inputImages) {
+				const compacted = filterAndRenumberReferencedImages(text, inputImages);
+				text = compacted.text;
+				inputImages = compacted.images;
+				if (inputImageLinks) {
+					inputImageLinks = inputImageLinks.filter((_, i) => compacted.refs.has(i + 1));
+				}
+				hasInputImages = inputImages.length > 0;
+			}
 
 			if (runner?.hasHandlers("input")) {
 				const result = await runner.emitInput(text, inputImages, "interactive");
@@ -1712,6 +1735,53 @@ export class InputController {
 			this.ctx.ui.requestRender();
 			this.ctx.showStatus("Failed to read pasted image path");
 		}
+	}
+
+	/**
+	 * Handle a file path pasted into the editor (from drag-drop or terminal paste).
+	 * Returns a replacement string for the editor, or undefined to keep the raw path.
+	 */
+	handleFilePaste(filePath: string): string | undefined {
+		const trimmed = filePath.trim();
+		if (!trimmed || !fsSync.existsSync(trimmed)) return undefined;
+
+		const ext = path.extname(trimmed).toLowerCase();
+		const IMAGE_EXT: Record<string, true> = {
+			".png": true,
+			".jpg": true,
+			".jpeg": true,
+			".gif": true,
+			".webp": true,
+			".bmp": true,
+			".svg": true,
+			".heic": true,
+			".ico": true,
+			".tiff": true,
+			".tif": true,
+		};
+
+		if (IMAGE_EXT[ext]) {
+			try {
+				const data = fsSync.readFileSync(trimmed);
+				const mimeType = ext === ".svg" ? "image/svg+xml" : `image/${ext.slice(1)}`;
+				const imageLink = materializeImageReferenceLinksSync(
+					[{ type: "image", data: data.toString("base64"), mimeType }],
+					this.ctx.sessionManager.putBlobSync.bind(this.ctx.sessionManager),
+				)?.[0];
+				this.ctx.editor.pendingImages.push({ type: "image", data: data.toString("base64"), mimeType });
+				this.ctx.editor.pendingImageLinks.push(imageLink);
+				this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
+				const imageNum = this.ctx.editor.pendingImages.length;
+				return `[Image #${imageNum}] `;
+			} catch {
+				return undefined;
+			}
+		}
+
+		// Non-image file: return styled [File: basename] reference.
+		const basename = path.basename(trimmed);
+		const label = `\x1b[1m\x1b[4m[File: ${basename}]\x1b[24m\x1b[22m`;
+		return `${fileHyperlink(trimmed, label)} `;
 	}
 
 	async handleImagePaste(): Promise<boolean> {

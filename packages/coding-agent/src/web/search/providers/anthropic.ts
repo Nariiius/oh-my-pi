@@ -396,7 +396,11 @@ export class AnthropicProvider extends SearchProvider {
 	readonly label = "Anthropic";
 
 	isAvailable(authStorage: AuthStorage): Promise<boolean> | boolean {
-		return Boolean($env.ANTHROPIC_SEARCH_API_KEY) || authStorage.hasAuth("anthropic");
+		return (
+			Boolean($env.ANTHROPIC_SEARCH_API_KEY) ||
+			authStorage.hasAuth("anthropic") ||
+			authStorage.hasAuth("github-copilot")
+		);
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

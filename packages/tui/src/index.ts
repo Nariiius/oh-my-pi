@@ -37,6 +37,8 @@ export * from "./latex-block";
 export * from "./latex-to-unicode";
 // SGR mouse report parsing
 export * from "./mouse";
+// Native macOS modifier key detection via CoreGraphics
+export * from "./native-modifiers";
 // Mermaid diagram support
 // Input buffering for batch splitting
 export * from "./stdin-buffer";

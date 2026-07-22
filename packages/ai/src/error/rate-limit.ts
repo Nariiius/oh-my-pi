@@ -214,12 +214,26 @@ export function parseRateLimitReason(errorMessage: string): RateLimitReason {
 		return "QUOTA_EXHAUSTED";
 	}
 
-	if (
-		lower.includes("per minute") ||
-		lower.includes("rate limit") ||
-		lower.includes("too many requests") ||
-		lower.includes("presque")
-	) {
+	if (lower.includes("per minute") || lower.includes("presque")) {
+		return "RATE_LIMIT_EXCEEDED";
+	}
+
+	if (lower.includes("rate limit") || lower.includes("too many requests")) {
+		// Distinguish: "rate limit" + quota/billing/free-tier language is a hard quota.
+		if (
+			lower.includes("free") ||
+			lower.includes("tier") ||
+			lower.includes("quota") ||
+			lower.includes("exhausted") ||
+			lower.includes("upgrade") ||
+			lower.includes("credits") ||
+			lower.includes("billing") ||
+			lower.includes("payment") ||
+			lower.includes("insufficient") ||
+			lower.includes("402")
+		) {
+			return "QUOTA_EXHAUSTED";
+		}
 		return "RATE_LIMIT_EXCEEDED";
 	}
 

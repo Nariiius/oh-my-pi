@@ -405,6 +405,113 @@ const noOpUIContext: ExtensionUIContext = {
 // AgentSession Class
 // ============================================================================
 
+function queuedTextContent(message: AgentMessage): string | undefined {
+	if (!("content" in message)) return undefined;
+	const content = message.content;
+	if (typeof content === "string") return content;
+	for (const part of content) {
+		if (part.type === "text") return part.text;
+	}
+	return undefined;
+}
+
+function queuedImageContent(message: AgentMessage): ImageContent[] | undefined {
+	if (!("content" in message) || typeof message.content === "string") return undefined;
+	const images: ImageContent[] = [];
+	for (const part of message.content) {
+		if (part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string") {
+			images.push(part);
+		}
+	}
+	return images.length > 0 ? images : undefined;
+}
+
+function isDisplayableQueuedMessage(message: AgentMessage): boolean {
+	return !(message.role === "custom" && message.display === false);
+}
+
+function isAdvisorCard(message: AgentMessage): message is CustomMessage {
+	return message.role === "custom" && message.customType === "advisor";
+}
+
+function isTerminalTextAssistantAnswer(message: AgentMessage | undefined): message is AssistantMessage {
+	if (message?.role !== "assistant" || message.stopReason !== "stop") return false;
+	let hasText = false;
+	for (const part of message.content) {
+		if (part.type === "toolCall") return false;
+		if (part.type === "text") {
+			if (part.text.trim().length > 0) hasText = true;
+			continue;
+		}
+		if (part.type === "thinking" || part.type === "redactedThinking" || part.type === "fallback") continue;
+		return false;
+	}
+	return hasText;
+}
+
+/**
+ * A queued message the user can restore to the editor / pull back as a draft.
+ * Only genuinely user-authored messages qualify: plain user turns, or custom
+ * messages explicitly attributed to the user (e.g. `/skill` invocations).
+ * Agent-authored queued cards — advisor concern/blocker notes, IRC asides,
+ * extension notices, hidden goal/plan/budget steers — ride the same
+ * steer/follow-up queues but must never be dumped into the editor on Esc/Alt+Up.
+ */
+function isUserQueuedMessage(message: AgentMessage): boolean {
+	if (message.role === "user") return true;
+	return message.role === "custom" && message.attribution === "user" && message.display !== false;
+}
+
+/** Custom-message types of the hidden magic-keyword notices that `#createMagicKeywordNotices`
+ *  enqueues alongside a user prompt. Keep in sync with that method. */
+const MAGIC_KEYWORD_NOTICE_TYPES: ReadonlySet<string> = new Set([
+	"ultrathink-notice",
+	"orchestrate-notice",
+	"workflow-notice",
+]);
+
+/** Custom-message type formerly used for auto-injected image descriptions.
+ *  Kept so queued companions from older sessions are still dropped with their prompt. */
+const IMAGE_ATTACHMENT_DESCRIPTION_TYPE = "image-attachment-description";
+
+/**
+ * A hidden, user-attributed companion of a queued user prompt: the magic-keyword
+ * notices (`ultrathink`/`orchestrate`/`workflow`) enqueued alongside the user
+ * message. They are `attribution: "user"` but `display: false`, so they are not
+ * editor-restorable; when the user pulls their prompt back out of the queue these
+ * must leave with it rather than linger as stale, companion-less steering. Scoped to
+ * the known notice types so an unrelated hidden user custom is never silently dropped.
+ */
+function isHiddenUserCompanion(message: AgentMessage): boolean {
+	return (
+		message.role === "custom" &&
+		message.attribution === "user" &&
+		message.display === false &&
+		(MAGIC_KEYWORD_NOTICE_TYPES.has(message.customType) || message.customType === IMAGE_ATTACHMENT_DESCRIPTION_TYPE)
+	);
+}
+
+function queueChipText(message: AgentMessage): string {
+	if (message.role === "custom") {
+		return readQueueChipText(message.details) ?? queuedTextContent(message) ?? "";
+	}
+	const text = queuedTextContent(message) ?? "";
+	if (text) return text;
+	return queuedImageContent(message) ? "[Image]" : "";
+}
+
+function toRestoredQueuedMessage(message: AgentMessage): RestoredQueuedMessage {
+	return { text: queueChipText(message), images: queuedImageContent(message) };
+}
+
+function mergeLlmCompactionPreserveData(
+	hookPreserveData: Record<string, unknown> | undefined,
+	resultPreserveData: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+	const preserveData = { ...(hookPreserveData ?? {}), ...(resultPreserveData ?? {}) };
+	return snapcompact.stripPreservedArchive(Object.keys(preserveData).length > 0 ? preserveData : undefined);
+}
+
 type MessageEndPersistenceSlot = {
 	readonly promise: Promise<void>;
 	persist: (persistMessage: () => void) => Promise<void>;
@@ -511,6 +618,9 @@ export class AgentSession {
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
+	/** Images attached to the current in-flight user prompt. Exposed to tools so
+	 *  image references like `Image #1` can be resolved before the turn is persisted. */
+	#pendingPromptImages?: ImageContent[];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
 	#planModeState: PlanModeState | undefined;
@@ -4958,8 +5068,19 @@ export class AgentSession {
 		return this.agent.state.messages;
 	}
 
-	/** Latest image attachments addressable by tools as `Image #N` or `attachment://N`. */
+/** Latest image attachments addressable by tools as `Image #N` or `attachment://N`.
+ *  Prefers images attached to the current in-flight prompt before the turn is persisted,
+ *  then falls back to the provider boundary's committed-message lookup. */
 	getImageAttachments(): ImageAttachmentEntry[] {
+		const pending = this.#pendingPromptImages;
+		if (pending && pending.length > 0) {
+			return pending.map((image, index) => ({
+				label: `Image #${index + 1}`,
+				uri: `attachment://${index + 1}`,
+				image,
+				sourcePath: "",
+			}));
+		}
 		return this.#providerBoundary.getImageAttachments();
 	}
 
@@ -5458,13 +5579,6 @@ export class AgentSession {
 		return normalizeModelContextImages(images, { model: this.model });
 	}
 
-	#buildImageDescriptionNotice(
-		normalizedImages: ImageContent[],
-		signal?: AbortSignal,
-	): Promise<CustomMessage | undefined> {
-		return this.#providerBoundary.buildImageDescriptionNotice(normalizedImages, signal);
-	}
-
 	#normalizeAgentMessageImages<T extends AgentMessage>(message: T): Promise<T> {
 		return this.#providerBoundary.normalizeAgentMessageImages(message);
 	}
@@ -5632,11 +5746,6 @@ export class AgentSession {
 		if (normalizedImages?.length) {
 			userContent.push(...normalizedImages);
 		}
-		// Text-only model + image attachment: describe via a vision model and inject the
-		// description as a hidden companion (the image stays in the visible user message).
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 		if (externalThinkingToolChoice) {
@@ -5668,8 +5777,8 @@ export class AgentSession {
 				...options,
 				images: normalizedImages,
 				prependMessages:
-					preludeMessages.length > 0 || keywordNotices.length > 0 || imageDescriptionNotice
-						? [...preludeMessages, ...keywordNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])]
+					preludeMessages.length > 0 || keywordNotices.length > 0
+						? [...preludeMessages, ...keywordNotices]
 						: undefined,
 			});
 		} finally {
@@ -5854,6 +5963,7 @@ export class AgentSession {
 			// final provider prompt still carries the base xd:// catalog.
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
+			this.#pendingPromptImages = queuedImageContent(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			for (const msg of this.#pendingNextTurnMessages) {
 				messages.push(msg);
@@ -5989,6 +6099,7 @@ export class AgentSession {
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
+				this.#pendingPromptImages = undefined;
 			}
 			if (!options?.skipPostPromptRecoveryWait) {
 				await this.#waitForPostPromptRecovery(generation);
@@ -6196,11 +6307,8 @@ export class AgentSession {
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
 		}
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
 		this.#allowQueuedMessageDrainRetry();
-		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
+
 		this.agent.followUp({
 			role: "developer",
 			content,
@@ -6251,14 +6359,8 @@ export class AgentSession {
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
 		}
-		// Text-only model + image attachment: describe via a vision model and enqueue the
-		// description as a hidden companion immediately before the user message.
-		const imageDescriptionNotice = normalizedImages?.length
-			? await this.#buildImageDescriptionNotice(normalizedImages)
-			: undefined;
 		this.#allowQueuedMessageDrainRetry();
 		if (mode === "followUp") {
-			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 			this.agent.followUp({
 				role: "user",
 				content,
@@ -6266,7 +6368,6 @@ export class AgentSession {
 				timestamp: Date.now(),
 			});
 		} else {
-			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
 			this.agent.steer({
 				role: "user",
 				content,
@@ -7744,7 +7845,1007 @@ export class AgentSession {
 	// Auto-Retry
 	// =========================================================================
 
-	/** Cancel an in-progress retry. */
+	/**
+	 * Classify retry decisions against the active session model. Test stream
+	 * shims and provider adapters can emit generic assistant metadata, but retry
+	 * policy belongs to the model that was actually requested for this turn.
+	 */
+	#classifyRetryMessage(message: AssistantMessage): number {
+		const activeModel = this.model;
+		if (!activeModel || message.api === activeModel.api) {
+			return AIError.classifyMessage(message);
+		}
+
+		const id = AIError.classifyMessage({
+			api: activeModel.api,
+			errorId: message.errorId,
+			errorMessage: message.errorMessage,
+			errorStatus: message.errorStatus,
+		});
+		message.errorId = id;
+		return id;
+	}
+
+	#isGenericAbortSentinel(message: AssistantMessage): boolean {
+		return message.errorMessage === "Request was aborted" || message.errorMessage === "Request was aborted.";
+	}
+
+	/**
+	 * Retry an empty, reason-less provider abort: a turn with no content that
+	 * carries the generic sentinel (bare `abort()`), whether the provider
+	 * finalized it as `stopReason: "aborted"` or leaked it as `stopReason:
+	 * "error"` (a stalled/dropped stream reported as an error rather than an
+	 * abort — issue #5375). Only fires while the session is neither aborting nor
+	 * tearing down. A user/lifecycle abort (`#abortInProgress`), a dispose-driven
+	 * abort (`#isDisposed`), or a session-induced streaming-edit guard abort
+	 * (`#streamingEditAbortTriggered` — auto-generated-file guard or failed-patch
+	 * preview) is deliberate and MUST settle the turn instead: routing it through
+	 * retry would orphan `#retryPromise` on a continuation the guard skips
+	 * (hanging the in-flight `prompt()`) or silently undo the guard's intended
+	 * abort. Deliberate user interrupts (`UserInterrupt`) and silent aborts carry
+	 * their own marker, not the generic sentinel, so they never match here.
+	 */
+	#isRetryableReasonlessAbort(message: AssistantMessage): boolean {
+		if (
+			(message.stopReason !== "aborted" && message.stopReason !== "error") ||
+			message.content.length !== 0 ||
+			this.#abortInProgress ||
+			this.#isDisposed ||
+			this.#streamingEditAbortTriggered
+		) {
+			return false;
+		}
+
+		const id = this.#classifyRetryMessage(message);
+		if (message.stopReason === "aborted" && AIError.is(id, AIError.Flag.Abort)) return true;
+		if (!this.#isGenericAbortSentinel(message)) return false;
+
+		message.errorId = AIError.create(AIError.Flag.Abort);
+		return true;
+	}
+
+	#isVisionFailureError(errorMessage: string): boolean {
+		if (!this.#lastUserMessageHasImages()) return false;
+		return /not supported|unsupported|modality|modalities|format|vision|image|connect error|internal.?error/i.test(
+			errorMessage,
+		);
+	}
+
+	#lastUserMessageHasImages(): boolean {
+		const messages = this.agent.state.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i];
+			if (msg.role === "user" || msg.role === "developer") {
+				if (Array.isArray(msg.content)) {
+					return msg.content.some(c => c.type === "image");
+				}
+				break;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Check if an error is retryable (transient errors or usage limits).
+	 * Context overflow is NOT retryable (handled by compaction instead).
+	 * Usage-limit errors are retryable because the retry handler performs credential switching.
+	 */
+	#isRetryableError(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error") return false;
+
+		const errorMessage = message.errorMessage || "";
+		if (/timed out while waiting for the first event|stalled while waiting for the next event/i.test(errorMessage)) {
+			return false;
+		}
+
+		const id = this.#classifyRetryMessage(message);
+		// Context overflow is handled by compaction, not retry
+		const contextWindow = this.model?.contextWindow ?? 0;
+		if (AIError.isContextOverflow(message, contextWindow)) return false;
+
+		if (this.#isClassifierRefusal(message)) return true;
+		return AIError.retriable(id, { replayUnsafe: this.#hasReplayUnsafeToolOutput(message) });
+	}
+
+	/**
+	 * Resume a stalled Cursor turn after every server-executed tool has produced
+	 * a result. The failed assistant/tool-result pair must stay in context: it
+	 * records completed side effects and lets the next request continue from
+	 * them instead of replaying the original turn.
+	 */
+	#canResumeCursorStreamStall(message: AssistantMessage): boolean {
+		if (
+			message.provider !== "cursor" ||
+			message.stopReason !== "error" ||
+			!message.errorMessage?.toLowerCase().includes("stream stall")
+		) {
+			return false;
+		}
+		const id = this.#classifyRetryMessage(message);
+		if (!AIError.retriable(id)) return false;
+
+		const resolvedToolCallIds: string[] = [];
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			if (!(kCursorExecResolved in block) || block[kCursorExecResolved] !== true) return false;
+			resolvedToolCallIds.push(block.id);
+		}
+		if (resolvedToolCallIds.length === 0) return false;
+
+		const messages = this.agent.state.messages;
+		let assistantIndex = -1;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const candidate = messages[i];
+			if (candidate.role === "assistant" && this.#isSameAssistantMessage(candidate, message)) {
+				assistantIndex = i;
+				break;
+			}
+		}
+		if (assistantIndex < 0) return false;
+
+		const unresolvedToolCallIds = new Set(resolvedToolCallIds);
+		for (let i = assistantIndex + 1; i < messages.length; i++) {
+			const candidate = messages[i];
+			if (candidate.role === "toolResult") unresolvedToolCallIds.delete(candidate.toolCallId);
+		}
+		return unresolvedToolCallIds.size === 0;
+	}
+	/**
+	 * Retried turns remove the failed assistant message from active context.
+	 * Text/thinking-only partials are safe to discard and replay. Retained
+	 * tool calls are not: a completed tool call may already have emitted its
+	 * tool result after this assistant message, so replaying can duplicate work.
+	 */
+	#hasReplayUnsafeToolOutput(message: AssistantMessage): boolean {
+		return message.content.some(block => block.type === "toolCall");
+	}
+
+	#isClassifierRefusal(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error") return false;
+		const stopType = message.stopDetails?.type;
+		return stopType === "refusal" || stopType === "sensitive";
+	}
+
+	/** True when any registered model belongs to `provider`. */
+	#hasProviderModels(provider: string): boolean {
+		return this.#modelRegistry.getAll().some(model => model.provider === provider);
+	}
+
+	#getRetryFallbackChains(): RetryFallbackChains {
+		const configuredChains = this.settings.get("retry.fallbackChains");
+		if (!configuredChains || typeof configuredChains !== "object") return {};
+		const chains: RetryFallbackChains = { ...(configuredChains as RetryFallbackChains) };
+		const defaultChain = chains.default;
+		if (Array.isArray(defaultChain)) {
+			for (const role of Object.keys(this.settings.getModelRoles())) {
+				if (role !== "default" && chains[role] === undefined) {
+					chains[role] = defaultChain;
+				}
+			}
+		}
+		return chains;
+	}
+
+	#validateRetryFallbackChains(): void {
+		const configuredChains = this.settings.get("retry.fallbackChains");
+		if (configuredChains === undefined) return;
+		if (!configuredChains || typeof configuredChains !== "object" || Array.isArray(configuredChains)) {
+			const msg = "retry.fallbackChains must be a mapping of role names or model selectors to selector arrays.";
+			logger.warn(msg);
+			this.configWarnings.push(msg);
+			return;
+		}
+
+		for (const key in configuredChains) {
+			const chain = (configuredChains as RetryFallbackChains)[key];
+			const keyKind = isRetryFallbackModelKey(key) ? "model" : "role";
+			if (keyKind === "model") {
+				if (isRetryFallbackWildcardKey(key)) {
+					const { provider } = parseRetryFallbackWildcard(key, p => this.#hasProviderModels(p));
+					if (!this.#hasProviderModels(provider)) {
+						const msg = `retry.fallbackChains wildcard key references unknown provider: ${key}`;
+						logger.warn(msg);
+						this.configWarnings.push(msg);
+					}
+				} else {
+					const parsedKey = parseRetryFallbackSelector(key, this.#modelRegistry);
+					if (!parsedKey) {
+						const msg = `Invalid model selector key in retry.fallbackChains: ${key}`;
+						logger.warn(msg);
+						this.configWarnings.push(msg);
+					} else if (!this.#modelRegistry.find(parsedKey.provider, parsedKey.id)) {
+						const msg = `retry.fallbackChains key references unknown model: ${key}`;
+						logger.warn(msg);
+						this.configWarnings.push(msg);
+					}
+				}
+			}
+			if (!Array.isArray(chain)) {
+				const msg = `Fallback chain for ${keyKind} '${key}' must be an array of selector strings.`;
+				logger.warn(msg);
+				this.configWarnings.push(msg);
+				continue;
+			}
+			for (const selectorStr of chain) {
+				if (typeof selectorStr !== "string") {
+					const msg = `Fallback chain for ${keyKind} '${key}' contains a non-string selector.`;
+					logger.warn(msg);
+					this.configWarnings.push(msg);
+					continue;
+				}
+				if (isRetryFallbackWildcardKey(selectorStr)) {
+					const { provider } = parseRetryFallbackWildcard(selectorStr, p => this.#hasProviderModels(p));
+					if (!this.#hasProviderModels(provider)) {
+						const msg = `Fallback chain for ${keyKind} '${key}' references unknown provider: ${selectorStr}`;
+						logger.warn(msg);
+						this.configWarnings.push(msg);
+					}
+					continue;
+				}
+				const parsed = parseRetryFallbackSelector(selectorStr, this.#modelRegistry);
+				if (!parsed) {
+					const msg = `Invalid fallback selector format in ${keyKind} '${key}': ${selectorStr}`;
+					logger.warn(msg);
+					this.configWarnings.push(msg);
+					continue;
+				}
+				const exists = this.#modelRegistry.find(parsed.provider, parsed.id);
+				if (!exists) {
+					const msg = `Fallback chain for ${keyKind} '${key}' references unknown model: ${selectorStr}`;
+					logger.warn(msg);
+					this.configWarnings.push(msg);
+				}
+			}
+		}
+	}
+
+	#getRetryFallbackRevertPolicy(): RetryFallbackRevertPolicy {
+		return this.settings.get("retry.fallbackRevertPolicy") === "never" ? "never" : "cooldown-expiry";
+	}
+
+	#getRetryFallbackPrimarySelector(role: string): RetryFallbackSelector | undefined {
+		if (isRetryFallbackWildcardKey(role)) return undefined;
+		if (isRetryFallbackModelKey(role)) return parseRetryFallbackSelector(role, this.#modelRegistry);
+		const configuredSelector = this.settings.getModelRole(role);
+		return configuredSelector ? parseRetryFallbackSelector(configuredSelector, this.#modelRegistry) : undefined;
+	}
+
+	#clearActiveRetryFallback(): void {
+		this.#activeRetryFallback = undefined;
+	}
+
+	#isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean {
+		return this.#modelRegistry.isSelectorSuppressed(selector.raw);
+	}
+
+	#noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void {
+		let cooldownMs = retryAfterMs;
+		if (!cooldownMs || cooldownMs <= 0) {
+			const reason = parseRateLimitReason(errorMessage);
+			cooldownMs = reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
+		}
+		this.#modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs);
+	}
+
+	/**
+	 * Map the failing model selector to the chain key that owns it, by
+	 * specificity: an exact model-selector key, then a `provider/*` wildcard,
+	 * then a model role whose current assignment matches, then `default`.
+	 * Model-oriented keys win over roles so a chain follows the model across
+	 * role reassignments.
+	 */
+	#resolveRetryFallbackRole(
+		currentSelector: string,
+		currentModel: Model | null | undefined = this.model,
+	): string | undefined {
+		const parsedCurrent = parseRetryFallbackSelector(currentSelector, this.#modelRegistry);
+		if (!parsedCurrent) return undefined;
+		const chains = this.#getRetryFallbackChains();
+		const currentBaseSelector = formatRetryFallbackBaseSelector(parsedCurrent);
+		const currentPlainSelector = currentModel
+			? formatModelSelectorValue(formatModelString(currentModel), parsedCurrent.thinkingLevel)
+			: undefined;
+		const currentPlainBaseSelector =
+			currentPlainSelector && currentPlainSelector !== currentSelector
+				? formatRetryFallbackBaseSelector(parseRetryFallbackSelector(currentPlainSelector) ?? parsedCurrent)
+				: undefined;
+
+		const exactModelKeys: string[] = [];
+		const roleKeys: string[] = [];
+		for (const key in chains) {
+			if (!isRetryFallbackModelKey(key)) roleKeys.push(key);
+			else if (!isRetryFallbackWildcardKey(key)) exactModelKeys.push(key);
+		}
+		const matchesCurrent = (primary: RetryFallbackSelector | undefined): boolean => {
+			if (!primary) return false;
+			if (primary.raw === currentSelector || (currentPlainSelector && primary.raw === currentPlainSelector)) {
+				return true;
+			}
+			const base = formatRetryFallbackBaseSelector(primary);
+			return base === currentBaseSelector || (!!currentPlainBaseSelector && base === currentPlainBaseSelector);
+		};
+
+		// 1. Exact model-selector keys — most specific.
+		for (const key of exactModelKeys) {
+			if (matchesCurrent(this.#getRetryFallbackPrimarySelector(key))) return key;
+		}
+		// 2. Provider wildcards — an id-prefixed key (`openrouter/google/*`)
+		//    beats the plain `provider/*` key for ids under its prefix.
+		let wildcardMatch: string | undefined;
+		let wildcardPrefixLength = -1;
+		for (const key in chains) {
+			if (!isRetryFallbackWildcardKey(key) || !Array.isArray(chains[key])) continue;
+			const { provider, idPrefix } = parseRetryFallbackWildcard(key, p => this.#hasProviderModels(p));
+			if (provider !== parsedCurrent.provider) continue;
+			if (idPrefix !== undefined && !parsedCurrent.id.startsWith(`${idPrefix}/`)) continue;
+			const prefixLength = idPrefix === undefined ? 0 : idPrefix.length;
+			if (prefixLength > wildcardPrefixLength) {
+				wildcardMatch = key;
+				wildcardPrefixLength = prefixLength;
+			}
+		}
+		if (wildcardMatch) return wildcardMatch;
+		// 3. Role keys — matched by the role's currently-assigned model.
+		for (const key of roleKeys) {
+			if (matchesCurrent(this.#getRetryFallbackPrimarySelector(key))) return key;
+		}
+		// 4. The default chain, when default has no explicit role primary.
+		const defaultChain = chains.default;
+		if (
+			Array.isArray(defaultChain) &&
+			defaultChain.length > 0 &&
+			this.#getRetryFallbackPrimarySelector("default") === undefined
+		) {
+			return "default";
+		}
+		return undefined;
+	}
+
+	/**
+	 * Parse one configured chain entry. A `provider/*` entry keeps the failing
+	 * model's id and swaps the provider (google-antigravity/x → google/x); an
+	 * id-prefixed `provider/prefix/*` entry re-prefixes the failing model's
+	 * bare id instead (openrouter/google/* : google-antigravity/x →
+	 * openrouter/google/x). Ids the target provider lacks are skipped by the
+	 * candidate loop's registry lookup.
+	 */
+	#parseRetryFallbackChainEntry(
+		entry: string,
+		current: RetryFallbackSelector | undefined,
+	): RetryFallbackSelector | undefined {
+		if (isRetryFallbackWildcardKey(entry)) {
+			if (!current) return undefined;
+			const { provider, idPrefix } = parseRetryFallbackWildcard(entry, p => this.#hasProviderModels(p));
+			const bareId = current.id.slice(current.id.lastIndexOf("/") + 1);
+			let id: string;
+			if (idPrefix !== undefined) {
+				id = `${idPrefix}/${bareId}`;
+			} else if (
+				bareId !== current.id &&
+				!this.#modelRegistry.find(provider, current.id) &&
+				this.#modelRegistry.find(provider, bareId)
+			) {
+				// Aggregator → direct: the failing id carries a vendor prefix the
+				// target provider does not use (openrouter/google/x → google-vertex/x).
+				id = bareId;
+			} else {
+				id = current.id;
+			}
+			return { raw: `${provider}/${id}`, provider, id, thinkingLevel: undefined };
+		}
+		return parseRetryFallbackSelector(entry, this.#modelRegistry);
+	}
+
+	#getRetryFallbackEffectiveChain(role: string, currentSelector?: string): RetryFallbackSelector[] {
+		const parsedCurrent = currentSelector
+			? parseRetryFallbackSelector(currentSelector, this.#modelRegistry)
+			: undefined;
+		const seen = new Set<string>();
+		const chain: RetryFallbackSelector[] = [];
+		if (isRetryFallbackWildcardKey(role)) {
+			// A wildcard key has no fixed primary: the active model is the
+			// primary, followed by the configured provider-level fallbacks.
+			if (parsedCurrent) {
+				chain.push(parsedCurrent);
+				seen.add(parsedCurrent.raw);
+			}
+		} else {
+			const primarySelector = this.#getRetryFallbackPrimarySelector(role);
+			if (!primarySelector) return [];
+			chain.push(primarySelector);
+			seen.add(primarySelector.raw);
+		}
+		for (const selector of this.#getRetryFallbackChains()[role] ?? []) {
+			const parsed = this.#parseRetryFallbackChainEntry(selector, parsedCurrent);
+			if (!parsed || seen.has(parsed.raw)) continue;
+			seen.add(parsed.raw);
+			chain.push(parsed);
+		}
+		return chain;
+	}
+
+	#findRetryFallbackCandidates(
+		role: string,
+		currentSelector: string,
+		currentModel: Model | null | undefined = this.model,
+	): RetryFallbackSelector[] {
+		let chain = this.#getRetryFallbackEffectiveChain(role, currentSelector);
+		const parsedCurrent = parseRetryFallbackSelector(currentSelector, this.#modelRegistry);
+		if (chain.length === 0 && role === "default" && parsedCurrent) {
+			const chains = this.#getRetryFallbackChains();
+			const defaultChain = chains.default;
+			if (
+				Array.isArray(defaultChain) &&
+				defaultChain.length > 0 &&
+				this.#getRetryFallbackPrimarySelector("default") === undefined
+			) {
+				const seen = new Set<string>([parsedCurrent.raw]);
+				chain = [parsedCurrent];
+				for (const selector of defaultChain) {
+					const parsed = this.#parseRetryFallbackChainEntry(selector, parsedCurrent);
+					if (!parsed || seen.has(parsed.raw)) continue;
+					seen.add(parsed.raw);
+					chain.push(parsed);
+				}
+			}
+		}
+		if (chain.length <= 1) return [];
+		const currentBaseSelector = parsedCurrent ? formatRetryFallbackBaseSelector(parsedCurrent) : undefined;
+		const currentPlainSelector =
+			currentModel && parsedCurrent
+				? formatModelSelectorValue(formatModelString(currentModel), parsedCurrent.thinkingLevel)
+				: undefined;
+		const currentPlainBaseSelector =
+			parsedCurrent && currentPlainSelector && currentPlainSelector !== currentSelector
+				? formatRetryFallbackBaseSelector(parseRetryFallbackSelector(currentPlainSelector) ?? parsedCurrent)
+				: undefined;
+		const exactIndex = chain.findIndex(
+			selector => selector.raw === currentSelector || selector.raw === currentPlainSelector,
+		);
+		if (exactIndex >= 0) return chain.slice(exactIndex + 1);
+		const baseIndex = currentBaseSelector
+			? chain.findIndex(selector => {
+					const selectorBase = formatRetryFallbackBaseSelector(selector);
+					return selectorBase === currentBaseSelector || selectorBase === currentPlainBaseSelector;
+				})
+			: -1;
+		if (baseIndex >= 0) return chain.slice(baseIndex + 1);
+		return chain.slice(1);
+	}
+
+	async #applyRetryFallbackCandidate(
+		role: string,
+		selector: RetryFallbackSelector,
+		currentSelector: string,
+		options?: { pinFallback?: boolean },
+	): Promise<void> {
+		const resolved = resolveModelOverride([selector.raw], this.#modelRegistry, this.settings);
+		const candidate = resolved.model ?? this.#modelRegistry.find(selector.provider, selector.id);
+		if (!candidate) {
+			throw new Error(`Retry fallback model not found: ${selector.raw}`);
+		}
+		const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+		if (!apiKey) {
+			throw new Error(`No API key for retry fallback ${selector.raw}`);
+		}
+
+		// Capture the configured selector (auto-aware) so a fallback chain preserves
+		// `auto` instead of collapsing it to the level it resolved to this turn.
+		const currentThinkingLevel = this.configuredThinkingLevel();
+		const nextThinkingLevel = selector.thinkingLevel ?? currentThinkingLevel;
+		const candidateSelector = formatModelStringWithRouting(candidate);
+		this.#setModelWithProviderSessionReset(candidate);
+		this.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE);
+		this.settings.getStorage()?.recordModelUsage(candidateSelector);
+		this.setThinkingLevel(nextThinkingLevel);
+		if (!this.#activeRetryFallback) {
+			this.#activeRetryFallback = {
+				role,
+				originalSelector: currentSelector,
+				originalThinkingLevel: currentThinkingLevel,
+				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
+				pinned: options?.pinFallback === true,
+			};
+		} else {
+			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
+			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
+		}
+		await this.#emitSessionEvent({
+			type: "retry_fallback_applied",
+			from: currentSelector,
+			to: selector.raw,
+			role,
+		});
+	}
+
+	async #tryRetryModelFallback(currentSelector: string, options?: { pinFallback?: boolean }): Promise<boolean> {
+		const role = this.#activeRetryFallback?.role ?? this.#resolveRetryFallbackRole(currentSelector);
+		if (!role) return false;
+
+		for (const selector of this.#findRetryFallbackCandidates(role, currentSelector)) {
+			if (this.#isRetryFallbackSelectorSuppressed(selector)) continue;
+			const resolved = resolveModelOverride([selector.raw], this.#modelRegistry, this.settings);
+			const candidate = resolved.model ?? this.#modelRegistry.find(selector.provider, selector.id);
+			if (!candidate) continue;
+			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+			if (!apiKey) continue;
+			await this.#applyRetryFallbackCandidate(role, selector, currentSelector, options);
+			return true;
+		}
+
+		return false;
+	}
+
+	/** The active model when it is a Fireworks Fast (`-fast`) variant, else undefined. */
+	#activeFireworksFastModel(): Model | undefined {
+		const model = this.model;
+		return model?.provider === "fireworks" && isFireworksFastModelId(model.id) ? model : undefined;
+	}
+
+	/**
+	 * True when the current turn failed on a Fireworks Fast (`-fast`) model in a
+	 * way that should degrade to the reliable base (Standard) model. Fast is a
+	 * speed-optimized router with no SLA, so any *pre-content* failure — a
+	 * transient overload/5xx or a hard "router/model not found / unsupported" —
+	 * is worth retrying on the base id. Skips failures the base model shares:
+	 * context overflow (compaction's job), usage limits and auth errors (same
+	 * account/key), and turns that already emitted a tool call (replaying would
+	 * duplicate work). Requires the base model to exist in the registry.
+	 */
+	#isFireworksFastFallbackEligible(message: AssistantMessage): boolean {
+		const model = this.#activeFireworksFastModel();
+		if (!model) return false;
+		if (message.stopReason !== "error") return false;
+		if (message.content.some(block => block.type === "toolCall")) return false;
+		// A content refusal/sensitivity stop is the model's decision, not a route
+		// failure — switching to the base model would just re-trigger it.
+		if (this.#isClassifierRefusal(message)) return false;
+		const id = this.#classifyRetryMessage(message);
+		if (AIError.isContextOverflow(message, model.contextWindow ?? 0)) return false;
+		if (AIError.is(id, AIError.Flag.UsageLimit)) return false;
+		if (AIError.is(id, AIError.Flag.AuthFailed)) return false;
+		return this.#modelRegistry.find("fireworks", toFireworksBaseModelId(model.id)) !== undefined;
+	}
+
+	/**
+	 * True when a turn failed with a hard (non-retryable) provider error but a
+	 * configured `retry.fallbackChains` entry covers the active model: the same
+	 * model is not worth retrying, yet a DIFFERENT model is a fresh chance, so
+	 * the chain is consulted before the error becomes final. Skips failures a
+	 * model switch cannot fix or must not replay: cancellations (abort-flavored
+	 * errors are not model faults), context overflow (compaction's job),
+	 * classifier refusals (chain consult is handled on the retryable path with
+	 * `pinFallback`), and turns that already emitted a tool call (replaying
+	 * could duplicate work).
+	 */
+	#isHardErrorFallbackEligible(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error") return false;
+		const model = this.model;
+		if (!model) return false;
+		const retrySettings = this.settings.getGroup("retry");
+		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
+		if (this.#isClassifierRefusal(message)) return false;
+		const id = this.#classifyRetryMessage(message);
+		if (AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt)) return false;
+		if (AIError.isContextOverflow(message, model.contextWindow ?? 0)) return false;
+		if (this.#hasReplayUnsafeToolOutput(message)) return false;
+		const currentSelector = formatRetryFallbackSelector(model, this.thinkingLevel);
+		const role = this.#activeRetryFallback?.role ?? this.#resolveRetryFallbackRole(currentSelector);
+		if (!role) return false;
+		return this.#findRetryFallbackCandidates(role, currentSelector).length > 0;
+	}
+
+	/**
+	 * Switch the active model from a Fireworks Fast (`-fast`) variant to its base
+	 * (Standard) id and stick there for the rest of the session — the auto
+	 * fallback that makes Fast a safe default. Returns false when the current
+	 * model is not a fast variant, the base id is missing, or it has no key.
+	 */
+	async #tryFireworksFastFallback(currentSelector: string): Promise<boolean> {
+		const model = this.#activeFireworksFastModel();
+		if (!model) return false;
+		const baseModel = this.#modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
+		if (!baseModel) return false;
+		const apiKey = await this.#modelRegistry.getApiKey(baseModel, this.sessionId);
+		if (!apiKey) return false;
+		const baseSelector = formatModelStringWithRouting(baseModel);
+		this.#setModelWithProviderSessionReset(baseModel);
+		this.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE);
+		this.settings.getStorage()?.recordModelUsage(baseSelector);
+		await this.#emitSessionEvent({
+			type: "retry_fallback_applied",
+			from: currentSelector,
+			to: baseSelector,
+			role: "fireworks-fast",
+		});
+		return true;
+	}
+
+	async #maybeRestoreRetryFallbackPrimary(): Promise<void> {
+		if (!this.#activeRetryFallback) return;
+		if (this.#activeRetryFallback.pinned) return;
+		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return;
+
+		const {
+			originalSelector: originalSelectorRaw,
+			originalThinkingLevel,
+			lastAppliedFallbackThinkingLevel,
+		} = this.#activeRetryFallback;
+		const originalSelector = parseRetryFallbackSelector(originalSelectorRaw, this.#modelRegistry);
+		if (!originalSelector) {
+			this.#clearActiveRetryFallback();
+			return;
+		}
+
+		const currentModel = this.model;
+		if (!currentModel) return;
+		const currentSelector = formatRetryFallbackSelector(currentModel, this.thinkingLevel);
+		if (currentSelector === originalSelector.raw) {
+			if (!this.#isRetryFallbackSelectorSuppressed(originalSelector)) {
+				this.#clearActiveRetryFallback();
+			}
+			return;
+		}
+		if (this.#isRetryFallbackSelectorSuppressed(originalSelector)) return;
+
+		const resolvedPrimary = resolveModelOverride([originalSelector.raw], this.#modelRegistry, this.settings);
+		const primaryModel =
+			resolvedPrimary.model ?? this.#modelRegistry.find(originalSelector.provider, originalSelector.id);
+		if (!primaryModel) return;
+		const apiKey = await this.#modelRegistry.getApiKey(primaryModel, this.sessionId);
+		if (!apiKey) return;
+
+		const currentThinkingLevel = this.configuredThinkingLevel();
+		const thinkingToApply =
+			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;
+		const primarySelector = formatModelStringWithRouting(primaryModel);
+		this.#setModelWithProviderSessionReset(primaryModel);
+		this.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
+		this.settings.getStorage()?.recordModelUsage(primarySelector);
+		this.setThinkingLevel(thinkingToApply);
+		this.#clearActiveRetryFallback();
+	}
+
+	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
+		const now = Date.now();
+		const retryAfterMsMatch = /retry-after-ms\s*[:=]\s*(\d+)/i.exec(errorMessage);
+		if (retryAfterMsMatch) {
+			return Math.max(0, Number(retryAfterMsMatch[1]));
+		}
+
+		const retryAfterMatch = /retry-after\s*[:=]\s*([^\s,;]+)/i.exec(errorMessage);
+		if (retryAfterMatch) {
+			const value = retryAfterMatch[1];
+			const seconds = Number(value);
+			if (!Number.isNaN(seconds)) {
+				return Math.max(0, seconds * 1000);
+			}
+			const dateMs = Date.parse(value);
+			if (!Number.isNaN(dateMs)) {
+				return Math.max(0, dateMs - now);
+			}
+		}
+
+		const retryHintMs = extractRetryHint(undefined, errorMessage);
+		if (retryHintMs !== undefined) {
+			return retryHintMs;
+		}
+
+		const resetMsMatch = /x-ratelimit-reset-ms\s*[:=]\s*(\d+)/i.exec(errorMessage);
+		if (resetMsMatch) {
+			const resetMs = Number(resetMsMatch[1]);
+			if (!Number.isNaN(resetMs)) {
+				if (resetMs > 1_000_000_000_000) {
+					return Math.max(0, resetMs - now);
+				}
+				return Math.max(0, resetMs);
+			}
+		}
+
+		const resetMatch = /x-ratelimit-reset\s*[:=]\s*(\d+)/i.exec(errorMessage);
+		if (resetMatch) {
+			const resetSeconds = Number(resetMatch[1]);
+			if (!Number.isNaN(resetSeconds)) {
+				if (resetSeconds > 1_000_000_000) {
+					return Math.max(0, resetSeconds * 1000 - now);
+				}
+				return Math.max(0, resetSeconds * 1000);
+			}
+		}
+
+		// Smart Fallback if no exact headers found
+		return undefined;
+	}
+
+	/**
+	 * Handle retryable errors with exponential backoff, credential rotation, and
+	 * model-fallback chains. Also entered for NON-retryable errors when a switch
+	 * is the recovery (`fireworksFastFallback`, `hardErrorFallback`): then a
+	 * successful model switch retries immediately, and a failed switch surfaces
+	 * the error without a same-model backoff retry.
+	 * @returns true if retry was initiated, false if max retries exceeded or disabled
+	 */
+	async #handleRetryableError(
+		message: AssistantMessage,
+		options?: {
+			allowModelFallback?: boolean;
+			fireworksFastFallback?: boolean;
+			hardErrorFallback?: boolean;
+			preserveFailedTurn?: boolean;
+		},
+	): Promise<boolean> {
+		const retrySettings = this.settings.getGroup("retry");
+		// The Fireworks Fast→base degrade is an intrinsic model-selection safety net,
+		// not a retry loop, so it runs even when the user disabled retries: it switches
+		// the model once and lets the base turn proceed.
+		if (!retrySettings.enabled && !options?.fireworksFastFallback) return false;
+		const classifierRefusal = this.#isClassifierRefusal(message);
+
+		const generation = this.#promptGeneration;
+		this.#retryAttempt++;
+
+		// Create retry promise on first attempt so waitForRetry() can await it
+		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
+		if (!this.#retryPromise) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#retryPromise = promise;
+			this.#retryResolve = resolve;
+		}
+
+		// All attempts on the current model are spent. Don't fail yet: the
+		// fallback chain below gets one last consult. Credential rotation can
+		// consume the entire budget without the fallback branch ever running
+		// (every rotation sets switchedCredential and skips it), so without
+		// this last resort a provider-wide usage cap never fails over to the
+		// configured chain.
+		const retryBudgetExhausted = this.#retryAttempt > retrySettings.maxRetries;
+
+		const errorMessage = message.errorMessage || "Unknown error";
+		const id = this.#classifyRetryMessage(message);
+		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
+		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+		let delayMs = staleOpenAIResponsesReplayError
+			? 0
+			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+		let switchedCredential = false;
+		let switchedModel = false;
+		// Set when a usage-limit error pinned the wait to credential
+		// availability — suppresses the generic retry-after bump below.
+		let usageLimitWaitMs: number | undefined;
+
+		if (this.#isVisionFailureError(errorMessage)) {
+			// Retry immediately without mutating model.input — image analysis goes
+			// through inspect_image, not by disabling chat-model vision support.
+			delayMs = 0;
+		}
+
+		if (staleOpenAIResponsesReplayError) {
+			this.#resetCurrentResponsesProviderSession("stale replay error");
+		}
+
+		if (
+			!retryBudgetExhausted &&
+			this.model &&
+			!staleOpenAIResponsesReplayError &&
+			AIError.is(id, AIError.Flag.UsageLimit)
+		) {
+			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
+			const outcome = await this.#modelRegistry.authStorage.markUsageLimitReached(
+				this.model.provider,
+				this.sessionId,
+				{
+					retryAfterMs,
+					baseUrl: this.model.baseUrl,
+					modelId: this.model.id,
+				},
+			);
+			if (outcome.switched) {
+				switchedCredential = true;
+				delayMs = 0;
+			} else if (await this.#maybeAutoRedeemCodexReset()) {
+				// A live usage-limit 429 on the active Codex account, with a banked
+				// reset and the opt-in setting on: spend the reset and retry
+				// immediately instead of waiting out the window. Runs after the
+				// free sibling-switch above and before model fallback below.
+				switchedCredential = true;
+				delayMs = 0;
+			} else {
+				// No sibling credential is usable right now. Wait for whichever
+				// comes first: the provider's retry-after window for the current
+				// account, or the earliest moment a temporarily blocked sibling
+				// frees up (e.g. a 60s post-401 block or a 5-min usage-probe
+				// block) — the next attempt's getApiKey re-ranks and picks it up.
+				// Without this, one short-lived sibling block escalates a
+				// recoverable situation into the provider's multi-hour wait and
+				// trips the fail-fast cap below.
+				usageLimitWaitMs = retryAfterMs;
+				if (outcome.retryAtMs !== undefined) {
+					const siblingWaitMs = Math.max(0, outcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
+					if (siblingWaitMs < usageLimitWaitMs) {
+						usageLimitWaitMs = siblingWaitMs;
+					}
+				}
+				if (usageLimitWaitMs > delayMs) {
+					delayMs = usageLimitWaitMs;
+				}
+			}
+		}
+
+		const allowModelFallback = options?.allowModelFallback !== false;
+		const currentSelector = this.model ? formatRetryFallbackSelector(this.model, this.thinkingLevel) : undefined;
+		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
+			// A refusal chain stops at the retry budget: the exhausted-attempt
+			// last resort is for provider failures, not classifier decisions.
+			if (allowModelFallback && retrySettings.modelFallback && !(retryBudgetExhausted && classifierRefusal)) {
+				if (!classifierRefusal) {
+					this.#noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
+				}
+				switchedModel = await this.#tryRetryModelFallback(currentSelector, { pinFallback: classifierRefusal });
+			}
+			// Auto fallback from a Fireworks Fast variant to its base model. Independent
+			// of the role-fallback setting: it's intrinsic to the Fast contract (speed
+			// best-effort, degrade to Standard on failure) and triggers on hard router
+			// errors the generic retry classifier would otherwise reject.
+			if (!switchedModel && allowModelFallback && options?.fireworksFastFallback) {
+				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
+			}
+			if (switchedModel) {
+				delayMs = 0;
+			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
+				delayMs = parsedRetryAfterMs;
+			}
+		}
+		if (retryBudgetExhausted) {
+			if (!switchedModel) {
+				await this.#persistRetryLifecycleErrorMessage(message);
+				// Max retries exceeded and no fallback model to switch to: emit
+				// final failure and reset.
+				await this.#emitSessionEvent({
+					type: "auto_retry_end",
+					success: false,
+					attempt: this.#retryAttempt - 1,
+					finalError: message.errorMessage,
+				});
+				this.#clearPendingRecoveredRetryErrors();
+				this.#retryAttempt = 0;
+				this.#resolveRetry(); // Resolve so waitForRetry() completes
+				return false;
+			}
+			// The fallback model gets a fresh retry budget — leaving the spent
+			// counter in place would exhaust it again on its first error.
+			this.#retryAttempt = 1;
+		}
+		if (classifierRefusal && !switchedModel) {
+			this.#retryAttempt = 0;
+			this.#resolveRetry();
+			return false;
+		}
+		// A fallback switch was the whole reason we entered (Fast→base degrade or
+		// a hard-error chain consult) but it could not happen (e.g. no candidate
+		// has a credential). Don't fall through to backing-off and retrying the
+		// failing model for an error the generic classifier wouldn't retry —
+		// surface it instead.
+		if (
+			(options?.fireworksFastFallback || options?.hardErrorFallback) &&
+			!switchedModel &&
+			!this.#isRetryableError(message)
+		) {
+			this.#retryAttempt = 0;
+			this.#resolveRetry();
+			return false;
+		}
+
+		// Fail-fast cap: if the provider asks us to wait longer than
+		// retry.maxDelayMs and we have no fallback credential or model to
+		// switch to, surface the error instead of sleeping. Defends against
+		// 3-hour Anthropic rate-limit windows that would otherwise leave a
+		// subagent (or interactive session) silently hung. The original
+		// assistant error message is preserved in agent state so the caller
+		// can act on it.
+		const maxDelayMs = retrySettings.maxDelayMs;
+		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
+			await this.#persistRetryLifecycleErrorMessage(message);
+			const attempt = this.#retryAttempt;
+			this.#retryAttempt = 0;
+			await this.#emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: `Provider requested ${delayMs}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+			});
+			this.#clearPendingRecoveredRetryErrors();
+			this.#resolveRetry();
+			return false;
+		}
+
+		await this.#recordPendingRecoveredRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+
+		await this.#emitSessionEvent({
+			type: "auto_retry_start",
+			attempt: this.#retryAttempt,
+			maxAttempts: retrySettings.maxRetries,
+			delayMs,
+			errorMessage,
+			errorId: message.errorId,
+		});
+
+		// Cursor exec-channel tools have already run and emitted results. Keep that
+		// failed turn intact so continuation cannot repeat their side effects.
+		if (!options?.preserveFailedTurn) {
+			this.#removeAssistantMessageFromActiveContext(message, "auto-retry");
+		}
+
+		// A thinking/response loop retried into identical context loops again. Inject a
+		// hidden redirect so the retried turn sees a directive to break the repeated
+		// pattern instead of re-sampling the same stalled reasoning.
+		this.#maybeInjectThinkingLoopRedirect(id);
+
+		// Wait with exponential backoff (abortable).
+		const retryAbortController = new AbortController();
+		this.#retryAbortController?.abort();
+		this.#retryAbortController = retryAbortController;
+		try {
+			await scheduler.wait(delayMs, { signal: retryAbortController.signal });
+		} catch {
+			if (this.#retryAbortController !== retryAbortController) {
+				return false;
+			}
+			// Aborted during sleep - emit end event so UI can clean up
+			const attempt = this.#retryAttempt;
+			this.#retryAttempt = 0;
+			this.#retryAbortController = undefined;
+			await this.#emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: "Retry cancelled",
+			});
+			this.#clearPendingRecoveredRetryErrors();
+			this.#resolveRetry();
+			return false;
+		}
+		if (this.#retryAbortController === retryAbortController) {
+			this.#retryAbortController = undefined;
+		}
+
+		// Retry via continue() outside the agent_end event callback chain.
+		this.#scheduleAgentContinue({ delayMs: 1, generation });
+
+		return true;
+	}
+
+	/**
+	 * Inject a hidden redirect notice when a thinking/response loop is being retried, so
+	 * the retried turn carries an instruction to break the repeated pattern instead of
+	 * re-sampling the same stalled context. Injected on every {@link AIError.Flag.ThinkingLoop}
+	 * retry (the failed assistant is dropped each attempt, so the notice does not accumulate
+	 * unboundedly). No-op unless `id` carries the ThinkingLoop flag and the loop guard is
+	 * enabled. The notice is generic on purpose — the detector's detail can quote raw model
+	 * text, which must not be interpolated into a higher-priority developer message.
+	 */
+	#maybeInjectThinkingLoopRedirect(id: number): void {
+		if (!AIError.is(id, AIError.Flag.ThinkingLoop)) return;
+		if (this.settings.get("model.loopGuard.enabled") !== true) return;
+		this.agent.appendMessage({
+			role: "custom",
+			customType: THINKING_LOOP_REDIRECT_TYPE,
+			content: thinkingLoopRedirectTemplate,
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		this.sessionManager.appendCustomMessageEntry(
+			THINKING_LOOP_REDIRECT_TYPE,
+			thinkingLoopRedirectTemplate,
+			false,
+			undefined,
+			"agent",
+		);
+	}
+
+	/**
+	 * Cancel in-progress retry.
+	 */
 	abortRetry(): void {
 		this.#recovery.abortRetry();
 	}

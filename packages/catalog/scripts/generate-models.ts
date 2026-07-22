@@ -82,6 +82,18 @@ const packageRoot = path.join(import.meta.dir, "..");
  */
 const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
 const RETIRED_PROVIDERS = new Set(["wafer-pass", "wandb"]);
+const RETIRED_MODEL_IDS = new Set([
+	"anthropic.claude-3-5-haiku-20241022-v1:0",
+	"eu.anthropic.claude-3-5-haiku-20241022-v1:0",
+	"anthropic/claude-3-5-haiku",
+	"claude-3-5-haiku@20241022",
+	"claude-3-5-haiku-20241022",
+	"claude-3-5-haiku",
+]);
+
+function excludeRetiredModels(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.filter(model => !RETIRED_MODEL_IDS.has(model.id));
+}
 
 async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscoveryConfig): Promise<string | undefined> {
 	for (const envVar of catalog.envVars ?? []) {
@@ -537,6 +549,7 @@ async function generateModels() {
 		[...bundledModelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
 		modelsDevModels,
 	);
+	allModels = excludeRetiredModels(allModels);
 
 	if (!allModels.some(model => model.provider === "cloudflare-ai-gateway")) {
 		allModels.push(CLOUDFLARE_FALLBACK_MODEL as ModelSpec<"anthropic-messages">);
@@ -694,6 +707,7 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("alibaba-token-plan")) {
 		allModels.unshift(...ALIBABA_TOKEN_PLAN_STATIC_MODELS);
 	}
+	allModels = excludeRetiredModels(allModels);
 	allModels = applyUmansPricingFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyXaiCatalogPricing(allModels);

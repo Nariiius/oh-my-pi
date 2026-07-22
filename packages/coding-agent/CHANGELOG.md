@@ -1561,6 +1561,13 @@
 - Fixed in-progress aborts awaiting `session_stop` extension handlers whose results would be discarded.
 - Fixed `/retry` reporting "Nothing to retry" after a stream stalled or aborted mid-tool-call.
 - Fixed locally consumed extension commands triggering automatic title generation and exposing their command text to the title model.
+### Removed
+
+- Removed `images.describeForTextModels` and the automatic pre-prompt image description path. Attached images are no longer OCR'd/described into chat context; the model must call `inspect_image` for visual or file analysis.
+
+### Changed
+
+- `inspect_image` stays top-level (not buried under `xd://`) and remains the path for analyzing images, PDFs, Office documents, text, and other files.
 
 ## [17.0.7] - 2026-07-21
 

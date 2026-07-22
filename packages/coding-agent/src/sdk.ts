@@ -134,6 +134,7 @@ import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memor
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
+import imageChatOmitHint from "./prompts/tools/image-chat-omit-hint.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
@@ -3224,23 +3225,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		const slashCommands = await slashCommandsPromise;
 
-		// Keep image blocks off the wire when they'd be rejected: either the user
-		// disabled images (`images.blockImages`) or the active model has no vision
-		// support. The latter covers switching from a vision model to a text-only
-		// one mid-session — historical image blocks would otherwise be replayed to
-		// a provider that 400s on them (#5400). Read both dynamically so a `/model`
-		// switch or setting change takes effect on the next turn.
+		// Keep image pixels off the main chat request when images are blocked or
+		// when inspect_image is available. The model should call inspect_image for
+		// visual analysis instead of answering from inline vision / a pre-baked
+		// description. Image bytes remain in session attachments for that tool.
 		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
 			const converted = convertToLlm(messages);
 			if (settings.get("images.blockImages")) {
-				return replaceLlmImagesWithText(converted, "Image reading is disabled.");
+				return replaceLlmImagesWithText(converted, "Image reading is disabled. Disable it to use images.");
 			}
-			const activeModel = agent?.state.model ?? model;
-			if (activeModel && !activeModel.input.includes("image")) {
-				return replaceLlmImagesWithText(
-					converted,
-					"[image omitted: the active model does not support image input]",
-				);
+			if (settings.get("inspect_image.mode") !== "off") {
+				return replaceLlmImagesWithText(converted, prompt.render(imageChatOmitHint).trim());
 			}
 			return converted;
 		};

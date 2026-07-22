@@ -978,6 +978,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.statusLine.setCodexResetFireworksHandler(event => {
 			this.#codexResetFireworksController.show(event);
 		});
+		// Pi-style footer: render the main status line in the standalone
+		// status-line component instead of the editor's top border.
+		this.statusLine.setShowMainStatus(true);
 		// Vibe worker tok/s aggregator — keeps the status-line render layer off
 		// the heavy vibe/task dependency graph. The director is often idle while
 		// workers stream, so without this the tok/s badge would show a stale
@@ -1185,7 +1188,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		});
 		this.composer.setStatusComponent(this.statusLine);
-
 		this.composer.setRuntimeChildren([
 			this.chatContainer,
 			this.pendingMessagesContainer,
@@ -1205,6 +1207,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.hookWidgetContainerAbove,
 			this.editorContainer,
 			this.hookWidgetContainerBelow,
+			// Status line renders the pi-style footer (main status) below the editor.
+			this.statusLine,
 		]);
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
@@ -2716,7 +2720,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		const status =
 			this.goalModeEnabled || this.goalModePaused
 				? { enabled: this.goalModeEnabled, paused: this.goalModePaused }
-				: undefined;
+				: null;
 		this.statusLine.setGoalModeStatus(status);
 		this.ui.requestRender();
 	}

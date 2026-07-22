@@ -1,5 +1,7 @@
 import { type Component, Container, Markdown } from "@oh-my-pi/pi-tui";
+
 import { formatBytes } from "@oh-my-pi/pi-utils";
+import { Box, Container, Markdown } from "@oh-my-pi/pi-tui";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { attachmentSgr, collapseImageMarkers, renderPlaceholders } from "../composer-attachments";
 import { imageReferenceHyperlink } from "../image-references";
@@ -44,7 +46,6 @@ export class UserMessageComponent extends Container {
 		// but the transcript shows the same compact `<icon> #N` chip the composer used. Runs before
 		// Markdown layout so wrapping and bubble padding are computed on the visible text.
 		text = collapseImageMarkers(text, Number.POSITIVE_INFINITY, () => {});
-		const bgColor = (value: string) => theme.bg("userMessageBg", value);
 		// Paint the magic keywords ("ultrathink"/"orchestrate"/"workflowz") inside the rendered
 		// bubble too — matching the live editor glow. The Markdown component routes code spans and
 		// fenced blocks through its own code styling (never `color`), so those are already excluded;
@@ -67,12 +68,13 @@ export class UserMessageComponent extends Container {
 					return kind === "image" ? imageReferenceHyperlink(label, index, imageLinks, () => styled) : styled;
 				},
 			});
-		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
-			bgColor,
+		const md = new Markdown(text, 0, 0, getMarkdownTheme(), {
 			color,
 		});
 		md.setIgnoreTight(true);
-		this.addChild(md);
+		const box = new Box(1, 1, (value: string) => theme.bg("userMessageBg", value));
+		box.addChild(md);
+		this.addChild(box);
 	}
 
 	override render(width: number): readonly string[] {

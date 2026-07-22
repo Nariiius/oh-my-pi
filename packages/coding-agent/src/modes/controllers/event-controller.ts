@@ -90,6 +90,7 @@ export class EventController {
 	#lastVisibleBlockCount = 0;
 	#renderedCustomMessages = new Set<string>();
 	#lastIntent: string | undefined = undefined;
+	#lastChatError: string | undefined = undefined;
 	#backgroundTaskCallIds = new Set<string>();
 	/** Tool calls whose approval prompt drove the title into `attention`; cleared
 	 *  at their tool_execution_end so the title returns to `working`. */
@@ -776,6 +777,7 @@ export class EventController {
 		this.#orphanedToolCompletions.clear();
 		this.#postToolAssistantComponents.clear();
 		this.#lastIntent = undefined;
+		this.#lastChatError = undefined;
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#resetReadGroup();
@@ -1024,6 +1026,7 @@ export class EventController {
 	async #handleNotice(event: Extract<AgentSessionEvent, { type: "notice" }>): Promise<void> {
 		const message = event.source ? `${event.source}: ${event.message}` : event.message;
 		if (event.level === "error") {
+			this.#lastChatError = message;
 			this.ctx.showError(message);
 		} else if (event.level === "warning") {
 			this.ctx.showWarning(message);
@@ -1372,7 +1375,13 @@ export class EventController {
 			// errors are known intermediate attempts: hide them entirely while
 			// session recovery continues, but retain the component so a terminal
 			// retry-cap event can promote its final error into the one banner.
-			if (event.message.stopReason === "error" && event.message.errorMessage && !isSilentAbort(event.message)) {
+			if (
+				event.message.stopReason === "error" &&
+				event.message.errorMessage &&
+				!isSilentAbort(event.message) &&
+				event.message.errorMessage !== this.#lastChatError
+			) {
+				this.#lastChatError = event.message.errorMessage;
 				const recoverableEmptyOutput =
 					!event.message.errorMessage.startsWith("Retry budget exhausted") &&
 					AIError.is(AIError.classifyMessage(event.message), AIError.Flag.EmptyResponse);
@@ -2009,7 +2018,7 @@ export class EventController {
 			text => theme.fg("muted", text),
 			() => {
 				const remaining = Math.max(0, event.delayMs - (Date.now() - retryStartMs));
-				return `${retryLabel} in ${formatDuration(remaining)}…${this.#maintenanceEscHint()}`;
+				return `${retryLabel}${event.errorMessage ? ` (${event.errorMessage})` : ""} in ${formatDuration(remaining)}…${this.#maintenanceEscHint()}`;
 			},
 			getSymbolTheme().spinnerFrames,
 		);
@@ -2067,8 +2076,11 @@ export class EventController {
 				if (terminalError) this.ctx.showPinnedError(terminalError);
 				this.#restorePinnedErrorInline = true;
 			} else {
-				this.ctx.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
+				this.ctx.showError(
+					`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`,
+				);
 			}
+			this.#lastChatError = event.finalError;
 		}
 		this.#ensureWorkingLoaderWhileStreaming();
 		this.ctx.ui.requestRender();

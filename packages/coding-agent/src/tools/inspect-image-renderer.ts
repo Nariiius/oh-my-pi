@@ -12,8 +12,9 @@ interface InspectImageRenderArgs {
 
 interface InspectImageRendererDetails {
 	model: string;
-	imagePath: string;
+	filePath: string;
 	mimeType: string;
+	kind?: string;
 }
 
 interface InspectImageRendererResult {
@@ -52,7 +53,7 @@ export const inspectImageToolRenderer = {
 	): Component {
 		const details = result.details;
 		const rawPath =
-			typeof details?.imagePath === "string" ? details.imagePath : typeof args?.path === "string" ? args.path : "";
+			typeof details?.filePath === "string" ? details.filePath : typeof args?.path === "string" ? args.path : "";
 		const pathDisplay = rawPath ? shortenPath(rawPath) : "image";
 		const success = !result.isError;
 		const header = renderStatusLine(
@@ -89,10 +90,10 @@ export const inspectImageToolRenderer = {
 			});
 		}
 
-		const metaParts: string[] = [];
-		if (details?.model) metaParts.push(details.model);
-		if (details?.mimeType) metaParts.push(details.mimeType);
-		const metaLine = metaParts.length > 0 ? uiTheme.fg("dim", metaParts.join(" · ")) : "";
+		const metaLineParts: string[] = [];
+		if (details?.model) metaLineParts.push(details.model);
+		if (details?.mimeType) metaLineParts.push(details.mimeType);
+		const metaLine = metaLineParts.length > 0 ? uiTheme.fg("dim", metaLineParts.join(" · ")) : "";
 
 		// No answer text: nothing worth boxing — keep it to a clean status line
 		// (plus a trailing meta line, when present).

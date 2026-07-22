@@ -508,7 +508,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// about), so suppressing its effort would leave K3 in an unsupported mode.
 		disableReasoningOnForcedToolChoice: (isKimiModel && !isMoonshotKimiK3) || isAnthropicModel,
 		disableReasoningOnToolChoice: isDeepseekFamily && Boolean(spec.reasoning) && !isOpenRouter,
-		supportsToolChoice: !isDirectDeepseekReasoning,
+		supportsToolChoice: !(isDeepseekFamily && Boolean(spec.reasoning)),
 		// DeepSeek reasoning models on OpenCode Zen/Go 400 with
 		// "Thinking mode does not support this tool_choice" when a specific
 		// function is forced while the gateway's default thinking mode is active.

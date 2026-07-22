@@ -68,6 +68,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const OpenAICompatSchema = type({
 		...OpenAICompatFields,
 		"whenThinking?": OpenAICompatFieldsSchema,
+		"[string]": "unknown",
 	});
 
 	const BedrockCompatSchema = type({

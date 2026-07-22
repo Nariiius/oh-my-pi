@@ -111,7 +111,7 @@ export const KEYBINDINGS = {
 		description: "Cycle to next model",
 	},
 	"app.model.cycleBackward": {
-		defaultKeys: "shift+ctrl+p",
+		defaultKeys: "ctrl+shift+p",
 		description: "Cycle to previous model",
 	},
 	"app.model.select": {

@@ -207,7 +207,6 @@ function messageFingerprint(msg: AgentMessage): string {
 	} else if (role === "branchSummary" || role === "compactionSummary") {
 		const s = (msg as { summary?: unknown }).summary;
 		if (typeof s === "string") textLen += s.length;
-	}
 	return `${role}:${ts}:${textLen}:${blocks}:${images}`;
 }
 
@@ -383,6 +382,16 @@ export class StatusLineComponent implements Component {
 	#speculationBlinkOn = true;
 	#hookStatuses: Map<string, string> = new Map();
 	#subagentCount: number = 0;
+	#showMainStatus: boolean = false;
+
+	/**
+	 * When true, the component renders the full status line (model, path, budget)
+	 * instead of only hook statuses. Use this when the editor is in "simple"
+	 * border mode and the status is not shown in the editor's top border.
+	 */
+	setShowMainStatus(show: boolean): void {
+		this.#showMainStatus = show;
+	}
 	/**
 	 * Active-processing accounting for the `time_spent` segment, keyed per
 	 * {@link AgentSession} so the focus-controller mid-turn attach path
@@ -662,7 +671,7 @@ export class StatusLineComponent implements Component {
 		this.#loopModeStatus = status ?? null;
 	}
 
-	setGoalModeStatus(status: { enabled: boolean; paused: boolean } | undefined): void {
+	setGoalModeStatus(status: { enabled: boolean; paused: boolean } | null | undefined): void {
 		this.#goalModeStatus = status ?? null;
 	}
 
@@ -2292,6 +2301,11 @@ export class StatusLineComponent implements Component {
 
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
+
+		// Main status line when not embedded in the editor border
+		if (this.#showMainStatus) {
+			lines.push(...this.#buildFooterLines(width));
+		}
 		if (this.#standalone && !this.#autocompleteActiveProbe?.()) {
 			const content = this.renderBottomBar(width, this.#standalone === "left-only" ? "left" : "full");
 			if (content) {
@@ -2306,6 +2320,71 @@ export class StatusLineComponent implements Component {
 				.map(([, text]) => truncateToWidth(sanitizeStatusText(text), width));
 			lines.push(...hookLines);
 		}
+		return lines;
+	}
+
+	#buildFooterLines(width: number): string[] {
+		const lines: string[] = [];
+		const sm = this.session.sessionManager;
+
+		// ── Line 1: Path ────────────────────────────────────────────
+		const cwd = sm?.getCwd();
+		const branch = this.#getCurrentBranch();
+		const sessionName = sm?.getSessionName();
+
+		let pwd = cwd ?? "";
+		if (pwd) {
+			const home = process.env.HOME || process.env.USERPROFILE;
+			if (home && pwd.startsWith(home)) pwd = `~${pwd.slice(home.length)}`;
+		}
+		if (branch) pwd = `${pwd} (${branch})`;
+
+		const pathWidth = visibleWidth(pwd);
+		const nameStr = sessionName ? ` \u2022 ${sessionName}` : "";
+		const nameWidth = visibleWidth(nameStr);
+		if (pathWidth + nameWidth <= width) {
+			const pad = " ".repeat(width - pathWidth - nameWidth);
+			lines.push(theme.fg("dim", pwd + pad + nameStr));
+		} else {
+			lines.push(theme.fg("dim", truncateToWidth(`${pwd}${nameStr}`, width)));
+		}
+
+		// ── Line 2: Stats + context + model ────────────────────────
+		const stats = sm?.getUsageStatistics?.() ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		const fmt = (n: number) =>
+			n < 1000 ? `${n}` : n < 10000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n / 1000)}k`;
+
+		const parts: string[] = [];
+		if (stats.cost) parts.push(theme.fg("dim", `$${stats.cost.toFixed(3)}`));
+
+		// Color-coded context (green < 70%, yellow 70-90%, red > 90%)
+		const ctx = this.session.getContextUsage();
+		const cw = ctx?.contextWindow ?? this.session.state.model?.contextWindow ?? 0;
+		const cpv = ctx?.percent ?? 0;
+		const cp = ctx?.percent !== null && ctx?.percent !== undefined ? cpv.toFixed(1) : "?";
+		const ai = this.#autoCompactEnabled ? " (auto)" : "";
+		const cd = cw > 0 ? `${cp}%/${fmt(cw)}${ai}` : `${cp}%${ai}`;
+		const color = cpv > 90 ? "error" : cpv > 70 ? "warning" : cpv > 0 ? "success" : "dim";
+		parts.push(theme.fg(color, cd));
+
+		const left = parts.join(" ");
+
+		// Model (right-aligned)
+		const mn = this.session.state.model?.name ?? this.session.state.model?.id ?? "Unknown";
+		const tl = this.session.state.thinkingLevel;
+		const mr = tl ? `${mn} \u2022 ${tl}` : mn;
+		const lw = visibleWidth(left);
+		const rw = visibleWidth(mr);
+		const line =
+			lw + rw + 2 <= width
+				? left + " ".repeat(width - lw - rw) + mr
+				: width - lw - 2 > 0
+					? left +
+						" ".repeat(Math.max(0, width - lw - visibleWidth(truncateToWidth(mr, width - lw - 2)))) +
+						truncateToWidth(mr, width - lw - 2)
+					: truncateToWidth(left, width);
+		lines.push(line);
+
 		return lines;
 	}
 }

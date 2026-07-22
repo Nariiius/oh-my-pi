@@ -7,6 +7,11 @@ import {
 	renderPlaceholders,
 	shiftImageMarkers,
 } from "@oh-my-pi/pi-coding-agent/modes/composer-attachments";
+import {
+	collectReferencedImageIndexes,
+	filterAndRenumberReferencedImages,
+	remapImageMarkers,
+} from "@oh-my-pi/pi-coding-agent/modes/image-references";
 
 function capture(text: string): {
 	out: string;
@@ -124,6 +129,40 @@ describe("compactImageMarkers", () => {
 	it("renumbers a legacy attachment URI alongside its marker", () => {
 		const result = compactImageMarkers("[Image #2] attachment://2", 2);
 		expect(result).toEqual({ text: "[Image #1] attachment://1", keep: [1] });
+	});
+});
+
+describe("collectReferencedImageIndexes", () => {
+	it("collects bare and WxH image markers", () => {
+		expect([...collectReferencedImageIndexes("[Image #1, 338x1316] what do you see?")]).toEqual([1]);
+		expect([...collectReferencedImageIndexes("[Image #1] and [Image #3, 100x100]")].sort((a, b) => a - b)).toEqual([
+			1, 3,
+		]);
+	});
+
+	it("ignores paste markers", () => {
+		expect([...collectReferencedImageIndexes("[Paste #1, +30 lines] [Image #2]")]).toEqual([2]);
+	});
+});
+
+describe("filterAndRenumberReferencedImages", () => {
+	it("keeps images referenced by WxH markers instead of dropping them", () => {
+		const images = ["a", "b"];
+		const result = filterAndRenumberReferencedImages("[Image #1, 338x1316] what do you see?", images);
+		expect(result.images).toEqual(["a"]);
+		expect(result.text).toBe("[Image #1, 338x1316] what do you see?");
+	});
+
+	it("collapses gaps and preserves WxH tails", () => {
+		const result = filterAndRenumberReferencedImages("[Image #1] keep [Image #3, 800x600]", ["a", "b", "c"]);
+		expect(result.images).toEqual(["a", "c"]);
+		expect(result.text).toBe("[Image #1] keep [Image #2, 800x600]");
+	});
+});
+
+describe("remapImageMarkers", () => {
+	it("rewrites mapped indexes and leaves unmapped markers alone", () => {
+		expect(remapImageMarkers("[Image #3, 10x10] [Image #9]", new Map([[3, 1]]))).toBe("[Image #1, 10x10] [Image #9]");
 	});
 });
 

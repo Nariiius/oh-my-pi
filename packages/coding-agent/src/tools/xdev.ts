@@ -59,6 +59,9 @@ export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 	ask: true,
 	grep: true,
 	web_search: true,
+	// Models are prompted to call inspect_image by name for image analysis;
+	// hiding it behind xd:// makes the instructed tool unreachable in practice.
+	inspect_image: true,
 };
 
 /**

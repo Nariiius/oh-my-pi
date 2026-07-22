@@ -67,11 +67,10 @@ export async function appendRawHttpRequestDumpFor400(
 
 	try {
 		await Bun.write(filePath, `${JSON.stringify(payload, null, 2)}\n`);
-		return `${message}\nraw-http-request=${filePath}`;
-	} catch (writeError) {
-		const writeMessage = writeError instanceof Error ? writeError.message : String(writeError);
-		return `${message}\nraw-http-request-save-failed=${writeMessage}`;
+	} catch {
+		// write failed — return the original message without appending error metadata
 	}
+	return message;
 }
 
 export async function finalizeErrorMessage(
