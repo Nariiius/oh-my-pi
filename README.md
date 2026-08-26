@@ -1,3 +1,46 @@
+> [!IMPORTANT]
+> **This is not official omp.** It is [@Nariiius](https://github.com/Nariiius)'s personal fork of [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi). The installers below (`curl omp.sh`, Homebrew, npm, Nix) still install **upstream**. To run *this* tree, use [How to run this fork](#how-to-run-this-fork).
+
+# Personal fork (`local-custom-v18`)
+
+A local checkout of omp with a small UI/keybinding layer on top. Everything else is upstream.
+
+## What is different
+
+| | Upstream (`can1357/oh-my-pi`) | This fork |
+| --- | --- | --- |
+| Session-only model picker (does not persist) | `Alt+P` | `Ctrl+N` — on macOS also `Cmd+O` |
+| Persistent model hub | `Alt+M` | `Alt+M` (unchanged) |
+| Composer / footer | Default composer shape is `box` | Default composer shape is **Pi**: two-line footer (cwd on one line, model/thinking/folder/cost on the next) |
+| Model picker | Standard selector | Adds a **cycle-selection slot** so you can pick the model that `Ctrl+P` / `Ctrl+Shift+P` rotate through, separately from the session-only picker |
+
+Also kept from this branch: file-paste in the composer actually applies; the image/PDF path matches upstream v18 (no extra vision-fallback setting).
+
+## How to run this fork
+
+You need [Bun](https://bun.sh) ≥ 1.3.14 (and a Rust toolchain if natives are not already built).
+
+```sh
+git clone -b local-custom-v18 https://github.com/Nariiius/oh-my-pi.git
+cd oh-my-pi
+bun setup
+bun dev
+```
+
+`bun setup` installs workspace deps and builds the native addon. `bun dev` starts **this** CLI from source — not the `omp` binary from Homebrew/npm.
+
+Smoke check:
+
+```sh
+bun dev -- --version
+```
+
+Checkout must be **`local-custom-v18`**. Cloning without `-b` lands on `main`, which is still upstream and does not include these changes.
+
+If you already have an `omp` from `omp.sh` / brew / npm, that binary is unrelated. Leave it installed; this source tree does not replace it until you run `bun dev` (or install from this clone yourself).
+
+---
+
 <p align="center">
   <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/hero.png?raw=true" alt="omp">
 </p>
@@ -33,6 +76,8 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 > vouch system may return.
 
 ## Install
+
+These install **official omp** from [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi), not this fork. For this tree, see [How to run this fork](#how-to-run-this-fork).
 
 **macOS · Linux**
 
