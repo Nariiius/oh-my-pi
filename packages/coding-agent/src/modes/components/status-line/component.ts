@@ -2342,14 +2342,16 @@ export class StatusLineComponent implements Component {
 		}
 		if (branch) pwd = `${pwd} (${branch})`;
 
-		const pathWidth = visibleWidth(pwd);
-		const nameStr = sessionName ? ` \u2022 ${sessionName}` : "";
+		const folderIcon = theme.icon.folder ? `${theme.icon.folder} ` : "";
+		const pathText = folderIcon + pwd;
+		const pathWidth = visibleWidth(pathText);
+		const nameStr = sessionName ? `${theme.sep.dot}${sessionName}` : "";
 		const nameWidth = visibleWidth(nameStr);
 		if (pathWidth + nameWidth <= width) {
 			const pad = " ".repeat(width - pathWidth - nameWidth);
-			lines.push(theme.fg("dim", pwd + pad + nameStr));
+			lines.push(theme.fg("dim", pathText + pad + nameStr));
 		} else {
-			lines.push(theme.fg("dim", truncateToWidth(`${pwd}${nameStr}`, width)));
+			lines.push(theme.fg("dim", truncateToWidth(`${pathText}${nameStr}`, width)));
 		}
 
 		// ── Line 2: Stats + context + model ────────────────────────
@@ -2358,7 +2360,8 @@ export class StatusLineComponent implements Component {
 			n < 1000 ? `${n}` : n < 10000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n / 1000)}k`;
 
 		const parts: string[] = [];
-		if (stats.cost) parts.push(theme.fg("dim", `$${stats.cost.toFixed(3)}`));
+		if (stats.cost)
+			parts.push(theme.fg("dim", `${theme.icon.cost ? `${theme.icon.cost} ` : ""}$${stats.cost.toFixed(3)}`));
 
 		// Color-coded context (green < 70%, yellow 70-90%, red > 90%)
 		const ctx = this.session.getContextUsage?.();
@@ -2372,10 +2375,13 @@ export class StatusLineComponent implements Component {
 
 		const left = parts.join(" ");
 
-		// Model (right-aligned)
+		// Model (right-aligned) — upstream model + thinking icons.
 		const mn = this.session.state.model?.name ?? this.session.state.model?.id ?? "Unknown";
+		const modelIcon = theme.icon.model ? `${theme.icon.model} ` : "";
 		const tl = this.session.state.thinkingLevel;
-		const mr = tl ? `${mn} \u2022 ${tl}` : mn;
+		const thinkingGlyph = tl !== undefined ? (theme.thinking[tl as keyof typeof theme.thinking] ?? tl) : undefined;
+		const modelText = `${modelIcon}${mn}`;
+		const mr = thinkingGlyph ? `${modelText} ${theme.sep.dot}${thinkingGlyph}` : modelText;
 		const lw = visibleWidth(left);
 		const rw = visibleWidth(mr);
 		const line =
