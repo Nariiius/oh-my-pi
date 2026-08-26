@@ -21,7 +21,7 @@ import {
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
-import { getKnownRoleIds } from "../config/model-roles";
+import { getKnownRoleIds, isCycleSelectionRole } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { containsUltrathink } from "../modes/ultrathink";
 import {
@@ -387,14 +387,60 @@ export class ModelControls {
 		direction: "forward" | "backward" = "forward",
 	): Promise<RoleModelCycleResult | undefined> {
 		const cycle = this.getRoleModelCycle(roleOrder);
-		if (!cycle || cycle.models.length <= 1) return undefined;
+		if (!cycle) return undefined;
+
+		// Interleave the virtual "selection" slot (opens the model picker) with
+		// concrete role-model slots, in the configured role order.
+		type CycleSlot = { kind: "model"; entry: ResolvedRoleModel } | { kind: "selection"; role: string };
+		const byRole = new Map(cycle.models.map(entry => [entry.role, entry]));
+		const slots: CycleSlot[] = [];
+		for (const role of roleOrder) {
+			if (isCycleSelectionRole(role)) {
+				slots.push({ kind: "selection", role });
+				continue;
+			}
+			const entry = byRole.get(role);
+			if (entry) slots.push({ kind: "model", entry });
+		}
+
+		if (slots.length <= 1) return undefined;
+
+		const currentModel = this.#model;
+		const lastRole = this.#host.sessionManager.getLastModelChangeRole();
+		let currentIndex = lastRole
+			? slots.findIndex(slot => slot.kind === "model" && slot.entry.role === lastRole)
+			: -1;
+		if (
+			currentIndex !== -1 &&
+			currentModel &&
+			slots[currentIndex]?.kind === "model"
+		) {
+			const entry = slots[currentIndex];
+			if (entry.kind === "model" && !modelsAreEqual(entry.entry.model, currentModel)) {
+				currentIndex = -1;
+			}
+		}
+		if (currentIndex === -1 && currentModel) {
+			for (let i = 0; i < slots.length; i++) {
+				const slot = slots[i];
+				if (slot.kind === "model" && modelsAreEqual(slot.entry.model, currentModel)) {
+					currentIndex = i;
+					break;
+				}
+			}
+		}
+		if (currentIndex === -1) currentIndex = 0;
 
 		const step = direction === "backward" ? -1 : 1;
-		const next = cycle.models[(cycle.currentIndex + step + cycle.models.length) % cycle.models.length];
+		const nextSlot = slots[(currentIndex + step + slots.length) % slots.length];
 
-		await this.applyRoleModel(next);
+		if (nextSlot.kind === "selection") {
+			return { role: nextSlot.role, openPicker: true };
+		}
 
-		return { model: next.model, thinkingLevel: this.thinkingLevel, role: next.role };
+		await this.applyRoleModel(nextSlot.entry);
+
+		return { model: nextSlot.entry.model, thinkingLevel: this.thinkingLevel, role: nextSlot.entry.role };
 	}
 
 	async #getScopedModelsWithApiKey(): Promise<Array<{ model: Model; thinkingLevel?: ThinkingLevel }>> {
