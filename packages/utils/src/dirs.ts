@@ -677,6 +677,15 @@ export function getGithubCacheDbPath(): string {
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "github-cache.db"), "cache");
 }
+/**
+ * Get the conventional commit inference cache database path (~/.omp/cache/commit-inference.db).
+ * Honors `OMP_COMMIT_CACHE_DB` so tests and operators can isolate the cache.
+ */
+export function getCommitCacheDbPath(): string {
+	const override = process.env.OMP_COMMIT_CACHE_DB;
+	if (override) return override;
+	return dirs.rootSubdir(path.join("cache", "commit-inference.db"), "cache");
+}
 
 /** Get the legacy Pi extension parse cache database path. */
 export function getLegacyPiExtensionCacheDbPath(): string {

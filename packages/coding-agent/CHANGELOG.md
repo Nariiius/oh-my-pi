@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added fast, cached conventional commit message generation to the git TUI and `omp commit --legacy`, including automatic handling of whitespace-only changes, clearer commit scopes, and improved grammar and tense in generated summaries.
+- The git TUI sidebar now supports collapsing and expanding the Unstaged and Staged sections, with keyboard shortcuts to stage or unstage an entire section.
+- Long streaming thinking and reasoning output now continues into terminal scrollback during a turn instead of remaining clipped to the viewport.
+
+### Changed
+
+- `omp commit --legacy` now uses the same conventional commit message generation as the git TUI.
+- The git TUI sidebar now groups new files separately from tracked changes in the Unstaged section, while Staged and commit file lists use a unified status-based view.
+- Improved resilience when streaming output changes during rendering, preventing incomplete blocks from causing further display updates to fail.
+
+### Fixed
+
+- Commit-message generation errors in the git TUI now remain visible in the status bar instead of disappearing and returning to an idle state.
+- Fixed `omp update` leaving standalone Windows binaries on the old version when stale Bun launcher metadata was present, and preserved launchers installed by a newer concurrent update during binary repair ([#9806](https://github.com/can1357/oh-my-pi/issues/9806)).
+- Quitting `omp git` during commit-message generation now exits cleanly without leaving the process running.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

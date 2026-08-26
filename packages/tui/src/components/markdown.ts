@@ -1866,6 +1866,15 @@ export class Markdown implements Component {
 		this.#cachedLines = undefined;
 	}
 
+	/**
+	 * Width-independent source prefix of the last render ending at a frozen
+	 * Markdown block boundary. Only meaningful while streaming (transient
+	 * render cache on); grows monotonically under append-only `setText`.
+	 */
+	getLastRenderStableText(): string {
+		return this.#transientRenderCache ? (this.#streamPrefixText ?? "") : "";
+	}
+
 	get transientRenderCache(): boolean {
 		return this.#transientRenderCache;
 	}

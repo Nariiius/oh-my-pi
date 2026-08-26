@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added the `backgroundIdleMs` option to customize how long background auth-broker activity remains active before automatically parking.
+
+### Fixed
+
+- Fixed auth-broker background activity keeping processes alive unnecessarily, so unused broker-backed auth storage now parks automatically and no longer prevents CLI exit.
+
 ## [18.0.5] - 2026-08-25
 
 ### Breaking Changes

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added conventional commit generation with support for dependency, security, configuration, UX, and infrastructure commit types, plus configurable caching and large-diff analysis behavior.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

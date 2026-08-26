@@ -5890,13 +5890,13 @@ export const SETTINGS_SCHEMA = {
 
 	"commit.mapReduceEnabled": { type: "boolean", default: true },
 
-	"commit.mapReduceMinFiles": { type: "number", default: 4 },
+	"commit.mapReduceThreshold": { type: "number", default: 5000 },
 
-	"commit.mapReduceMaxFileTokens": { type: "number", default: 50000 },
+	"commit.mapBatchTokenBudget": { type: "number", default: 16000 },
 
-	"commit.mapReduceTimeoutMs": { type: "number", default: 120000 },
+	"commit.cacheEnabled": { type: "boolean", default: true },
 
-	"commit.mapReduceMaxConcurrency": { type: "number", default: 5 },
+	"commit.cacheTtlDays": { type: "number", default: 14 },
 
 	"commit.changelogMaxDiffChars": { type: "number", default: 120000 },
 
@@ -6172,12 +6172,19 @@ export interface SkillsSettings {
 	disabledExtensions?: string[];
 }
 
+/** Conventional commit generation and changelog limits. */
 export interface CommitSettings {
+	/** Enable per-file map-reduce analysis above the token threshold. */
 	mapReduceEnabled: boolean;
-	mapReduceMinFiles: number;
-	mapReduceMaxFileTokens: number;
-	mapReduceTimeoutMs: number;
-	mapReduceMaxConcurrency: number;
+	/** Included diff tokens that trigger map-reduce. */
+	mapReduceThreshold: number;
+	/** Maximum prompt tokens assigned to one map batch. */
+	mapBatchTokenBudget: number;
+	/** Cache successfully parsed inference responses. */
+	cacheEnabled: boolean;
+	/** Days before cached inference responses expire; zero disables expiry. */
+	cacheTtlDays: number;
+	/** Maximum diff characters supplied to one changelog request. */
 	changelogMaxDiffChars: number;
 }
 
