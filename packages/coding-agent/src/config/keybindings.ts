@@ -84,8 +84,7 @@ export function getDefaultModelSelectKeys(platform: NodeJS.Platform = process.pl
 
 /** Shortcuts for the session-only (non-persisted) model picker. */
 export function getDefaultModelSelectTemporaryKeys(platform: NodeJS.Platform = process.platform): KeyId[] {
-	if (platform === "darwin") return ["alt+p", "super+o"];
-	return ["alt+p"];
+	return ["ctrl+n", ...(platform === "darwin" ? ["super+o"] : [])];
 }
 
 /**
