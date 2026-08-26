@@ -6,6 +6,7 @@ import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOption
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
+import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { validateProviderMaxInFlightRequests } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -13,8 +14,10 @@ import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
+import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallback";
 import { blobExtensionForImageMimeType } from "./blob-store";
-import { convertToLlm } from "./messages";
+import { type CustomMessage, convertToLlm } from "./messages";
+import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import type { SessionManager } from "./session-manager";
 
@@ -215,6 +218,51 @@ export class SessionProviderBoundary {
 	/** Normalizes image payloads for the active model. */
 	normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
 		return normalizeModelContextImages(images, { model: this.#host.model() });
+	}
+
+	/** Builds a hidden vision-model description for attachments sent to a text-only model. */
+	async buildImageDescriptionNotice(
+		normalizedImages: ImageContent[],
+		signal?: AbortSignal,
+	): Promise<CustomMessage | undefined> {
+		const model = this.#host.model();
+		const shouldDescribe =
+			!!model &&
+			!model.input.includes("image") &&
+			!this.#host.settings.get("images.blockImages") &&
+			this.#host.settings.get("images.describeForTextModels");
+		if (!shouldDescribe || !model) return undefined;
+
+		let blocks: TextContent[];
+		try {
+			blocks = await describeAttachedImagesForTextModel(
+				normalizedImages,
+				{
+					activeModel: model,
+					modelRegistry: this.#host.modelRegistry,
+					settings: this.#host.settings,
+					localProtocolOptions: this.#host.localProtocolOptions(),
+					activeModelString: formatModelString(model),
+					telemetryConfig: this.#host.agent.telemetry,
+					sessionId: this.#host.sessionId(),
+				},
+				signal,
+			);
+		} catch (error) {
+			logger.warn("image attachment vision fallback failed; image left undescribed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
+		if (blocks.length === 0) return undefined;
+		return {
+			role: "custom",
+			customType: IMAGE_ATTACHMENT_DESCRIPTION_TYPE,
+			content: blocks,
+			display: false,
+			attribution: "user",
+			timestamp: Date.now(),
+		};
 	}
 
 	/** Normalizes every image embedded in an agent message. */

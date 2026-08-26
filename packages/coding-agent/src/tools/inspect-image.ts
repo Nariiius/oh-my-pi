@@ -23,10 +23,7 @@ import inspectImageSystemPromptTemplate from "../prompts/tools/inspect-image-sys
 import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
 import {
 	ImageInputTooLargeError,
-	type InspectFileKind,
 	type LoadedImageInput,
-	type LoadedInspectFile,
-	loadFileForInspect,
 	loadImageAttachmentInput,
 	loadImageInput,
 	loadSvgImageInput,
@@ -39,9 +36,9 @@ import { ToolError } from "./tool-errors";
 
 const inspectImageSchema = type({
 	path: type("string").describe(
-		"file path (image, PDF, document, text, or other), local .svg/.svgz path with :img, Image #N label, or attachment://N URI",
+		"image file path, local .svg/.svgz path with :img, Image #N label, or attachment://N URI",
 	),
-	question: type("string").describe("question about the file"),
+	question: type("string").describe("question about image"),
 	"+": "reject",
 });
 
@@ -63,7 +60,8 @@ function parseImageAttachmentReference(path: string): ImageAttachmentReference |
 }
 
 function formatAvailableImageAttachments(attachments: readonly { label: string; uri: string }[]): string {
-	return attachments.map(a => `${a.label} -> ${a.uri}`).join(", ");
+	if (attachments.length === 0) return "none";
+	return attachments.map(attachment => `${attachment.label} -> ${attachment.uri}`).join(", ");
 }
 
 async function loadAttachmentReferenceInput(options: {
@@ -73,50 +71,32 @@ async function loadAttachmentReferenceInput(options: {
 	autoResize: boolean;
 	excludeWebP: boolean | undefined;
 }): Promise<LoadedImageInput | null> {
-	const { path, reference, attachments } = options;
-	let targetImage: ImageContent | undefined;
-	let resolvedPath = path;
-
-	// Resolve from live session attachments (including in-flight prompt images).
-	const normalizedPath = path.replace(/\[?Image #(\d+)(?:,[^\]\n]*)?\]?/i, "Image #$1");
-	for (const entry of attachments) {
-		if (entry.label === normalizedPath || entry.uri === path) {
-			targetImage = entry.image;
-			resolvedPath = entry.uri;
-			break;
+	const attachment = options.attachments[options.reference.index - 1];
+	if (!attachment) {
+		const available = formatAvailableImageAttachments(options.attachments);
+		if (options.attachments.length === 0) {
+			throw new ToolError(
+				`No image attachments are available in this turn. path="${options.path}" must be a readable file path or attachment URI.`,
+			);
 		}
+		throw new ToolError(
+			`Could not resolve image attachment '${options.path}'. Available image attachments: ${available}. Pass an attachment URI or a readable filesystem path.`,
+		);
 	}
-	// Positional fallback: Image #N → Nth live attachment.
-	if (!targetImage && reference.index >= 1 && reference.index <= attachments.length) {
-		const entry = attachments[reference.index - 1];
-		targetImage = entry.image;
-		resolvedPath = entry.uri;
-	}
-
-	if (!targetImage) return null;
-	const normalized = await loadImageAttachmentInput({
-		image: targetImage,
-		label: normalizedPath,
-		uri: resolvedPath,
+	return loadImageAttachmentInput({
+		image: attachment.image,
+		label: attachment.label,
+		uri: attachment.uri,
 		autoResize: options.autoResize,
 		maxBytes: MAX_IMAGE_INPUT_BYTES,
 		excludeWebP: options.excludeWebP,
 	});
-	if (normalized) return { ...normalized, resolvedPath };
-	return {
-		resolvedPath,
-		data: targetImage.data,
-		textNote: `[Image: ${resolvedPath}]`,
-		bytes: Buffer.from(targetImage.data, "base64").byteLength,
-		mimeType: targetImage.mimeType ?? "image/png",
-	};
 }
 
 export interface InspectImageToolDetails {
 	model: string;
-	filePath: string;
-	kind: InspectFileKind;
-	mimeType?: string;
+	imagePath: string;
+	mimeType: string;
 }
 
 export class InspectImageTool implements AgentTool<typeof inspectImageSchema, InspectImageToolDetails> {
@@ -124,7 +104,7 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 	readonly approval = "read" as const;
 	readonly label = "InspectImage";
 	readonly loadMode = "discoverable";
-	readonly summary = "Analyze any file (image, PDF, document, text, or binary) with a multimodal model";
+	readonly summary = "Describe or analyze an image file";
 	readonly description: string;
 	readonly parameters = inspectImageSchema;
 	readonly strict = false;
@@ -151,13 +131,6 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 				path: "photos/shelf.jpg",
 				question:
 					"List all clearly visible product labels and their shelf positions (top/middle/bottom). If unreadable, say unreadable.",
-			},
-		},
-		{
-			caption: "PDF analysis",
-			call: {
-				path: "reports/q3-financials.pdf",
-				question: "Extract the Q3 revenue and profit numbers.",
 			},
 		},
 	];
@@ -215,6 +188,12 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 			throw new ToolError("Unable to resolve a model for inspect_image.");
 		}
 
+		if (!model.input.includes("image")) {
+			throw new ToolError(
+				`Resolved model ${model.provider}/${model.id} does not support image input. Configure a vision-capable model for modelRoles.vision.`,
+			);
+		}
+
 		const apiKey = await modelRegistry.getApiKey(model);
 		if (!apiKey) {
 			throw new ToolError(
@@ -222,11 +201,7 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 			);
 		}
 
-		// Load the input. Native-image paths (real image files, `:img` SVGs,
-		// `[Image #N]` / `attachment://N` references) go through the v18 image
-		// pipeline so they keep auto-resize and WebP handling; every other file
-		// falls through to `loadFileForInspect`, which routes by detected type
-		// (image, PDF, document, text, binary).
+		let imageInput: LoadedImageInput | null;
 		const autoResize = this.session.settings.get("images.autoResize");
 		const excludeWebP = webpExclusionForModel(model);
 		const attachmentReference = parseImageAttachmentReference(params.path);
@@ -234,8 +209,6 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 			? undefined
 			: await splitPathAndSelPreferringLiteral(params.path, this.session.cwd);
 		const isSvgImage = imageTarget?.sel?.toLowerCase() === "img";
-
-		let imageInput: LoadedImageInput | null;
 		try {
 			if (attachmentReference) {
 				imageInput = await loadAttachmentReferenceInput({
@@ -269,83 +242,13 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 			throw error;
 		}
 
-		let file: LoadedInspectFile;
-		if (imageInput) {
-			file = {
-				resolvedPath: imageInput.resolvedPath,
-				kind: "image",
-				imageData: imageInput.data,
-				imageMimeType: imageInput.mimeType,
-				bytes: Buffer.from(imageInput.data, "base64").byteLength,
-			};
-		} else {
-			if (attachmentReference) {
-				const attachments = this.session.getImageAttachments?.() ?? [];
-				const available = formatAvailableImageAttachments(attachments);
-				throw new ToolError(
-					available
-						? `Could not find an image corresponding to ${params.path}. Available image attachments: ${available}.`
-						: `Could not find an image corresponding to ${params.path} in the session history.`,
-				);
-			}
-			if (isSvgImage) {
-				throw new ToolError("inspect_image ':img' only supports .svg and .svgz files.");
-			}
-			try {
-				file = await loadFileForInspect(params.path, this.session.cwd, MAX_IMAGE_INPUT_BYTES);
-			} catch (error) {
-				if (error instanceof ImageInputTooLargeError) {
-					throw new ToolError(error.message);
-				}
-				throw error;
-			}
+		if (!imageInput) {
+			throw new ToolError(
+				isSvgImage
+					? "inspect_image ':img' only supports .svg and .svgz files."
+					: "inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.",
+			);
 		}
-
-		// Build the user message content based on file kind. The vision-input
-		// check is deferred until the kind is known: text-only models may still
-		// answer questions about text-bearing files (documents, extracted PDF
-		// text, source files).
-		const messageContent: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> =
-			[];
-
-		if (file.kind === "image" && file.imageData) {
-			if (!model.input.includes("image")) {
-				throw new ToolError(
-					`Resolved model ${model.provider}/${model.id} does not support image input. Configure a vision-capable model for modelRoles.vision.`,
-				);
-			}
-			messageContent.push({
-				type: "image",
-				data: file.imageData,
-				mimeType: file.imageMimeType ?? "image/png",
-			});
-		}
-
-		let contextBlock: string;
-		switch (file.kind) {
-			case "image":
-				contextBlock = `[Image: ${file.resolvedPath}]`;
-				break;
-			case "pdf":
-				contextBlock = file.textContent
-					? `File: ${file.resolvedPath} (PDF)\n\nExtracted content:\n${file.textContent}`
-					: `File: ${file.resolvedPath} (PDF — no extractable text; analyze the visual representation if available)`;
-				break;
-			case "document":
-				contextBlock = `File: ${file.resolvedPath} (document)\n\nExtracted content:\n${file.textContent ?? "(empty)"}`;
-				break;
-			case "text":
-				contextBlock = `File: ${file.resolvedPath} (text)\n\nContent:\n${file.textContent ?? "(empty)"}`;
-				break;
-			case "binary":
-				contextBlock = `File: ${file.resolvedPath} (binary)\n\n${file.binaryNote ?? "Unknown binary format"}`;
-				break;
-		}
-
-		messageContent.push({
-			type: "text",
-			text: `${contextBlock}\n\nQuestion: ${params.question}`,
-		});
 
 		const telemetry = resolveTelemetry(this.session.getTelemetry?.(), this.session.getSessionId?.() ?? undefined);
 		const timeoutMs = this.session.settings.get("inspect_image.timeoutMs");
@@ -384,7 +287,10 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 					messages: [
 						{
 							role: "user",
-							content: messageContent,
+							content: [
+								{ type: "image", data: imageInput.data, mimeType: imageInput.mimeType },
+								{ type: "text", text: params.question },
+							],
 							timestamp: Date.now(),
 						},
 					],
@@ -420,9 +326,8 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 			content: [{ type: "text", text }],
 			details: {
 				model: `${model.provider}/${model.id}`,
-				filePath: file.resolvedPath,
-				kind: file.kind,
-				mimeType: file.imageMimeType,
+				imagePath: imageInput.resolvedPath,
+				mimeType: imageInput.mimeType,
 			},
 		};
 	}

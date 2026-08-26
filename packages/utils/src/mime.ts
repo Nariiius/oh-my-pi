@@ -12,56 +12,14 @@ const GIF89A = Buffer.from("GIF89a");
 const WEBP_VP8X = Buffer.from("VP8X");
 const WEBP_VP8L = Buffer.from("VP8L");
 const WEBP_VP8 = Buffer.from("VP8 ");
-const BMP_MAGIC = Buffer.from([0x42, 0x4d]);
-const TIFF_LE_MAGIC = Buffer.from([0x49, 0x49, 0x2a, 0x00]);
-const TIFF_BE_MAGIC = Buffer.from([0x4d, 0x4d, 0x00, 0x2a]);
-const ICO_MAGIC = Buffer.from([0x00, 0x00, 0x01, 0x00]);
-const PDF_MAGIC = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d]); // "%PDF-"
 
-const FTYP_MAGIC = Buffer.from("ftyp");
-const HEIC_BRANDS = new Set(["heic", "heix", "hevc", "hevx", "mif1", "msf1"]);
-
-/** All image mime types detected by magic bytes (some need conversion before model submission). */
-export const SUPPORTED_IMAGE_MIME_TYPES = new Set([
-	"image/png",
-	"image/jpeg",
-	"image/gif",
-	"image/webp",
-	"image/bmp",
-	"image/tiff",
-	"image/svg+xml",
-	"image/heic",
-	"image/x-icon",
-]);
+export const SUPPORTED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 export type ImageMetadata =
 	| { mimeType: "image/png"; width?: number; height?: number; channels?: number; hasAlpha?: boolean }
 	| { mimeType: "image/jpeg"; width?: number; height?: number; channels?: number; hasAlpha?: false }
 	| { mimeType: "image/gif"; width?: number; height?: number; channels?: 3; hasAlpha?: never }
-	| { mimeType: "image/webp"; width?: number; height?: number; channels?: number; hasAlpha?: boolean }
-	| { mimeType: "image/bmp"; width?: number; height?: number; channels?: number; hasAlpha?: boolean }
-	| { mimeType: "image/tiff"; width?: number; height?: number; channels?: number; hasAlpha?: boolean }
-	| { mimeType: "image/svg+xml"; width?: number; height?: number; channels?: number; hasAlpha?: boolean }
-	| { mimeType: "image/heic"; width?: number; height?: number; channels?: number; hasAlpha?: boolean }
-	| { mimeType: "image/x-icon"; width?: number; height?: number; channels?: number; hasAlpha?: boolean };
-
-/**
- * Canonical mime types for file extensions that map to convertible documents (not images).
- * These overlap with `CONVERTIBLE_EXTENSIONS` in the read tool.
- */
-export const DOCUMENT_EXT_MIME: Record<string, string> = {
-	".pdf": "application/pdf",
-	".doc": "application/msword",
-	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-	".ppt": "application/vnd.ms-powerpoint",
-	".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-	".xls": "application/vnd.ms-excel",
-	".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-	".rtf": "application/rtf",
-	".epub": "application/epub+zip",
-	".odt": "application/vnd.oasis.opendocument.text",
-	".odp": "application/vnd.oasis.opendocument.presentation",
-};
+	| { mimeType: "image/webp"; width?: number; height?: number; channels?: number; hasAlpha?: boolean };
 
 function magicEquals(header: Uint8Array, offset: number, magic: Buffer): boolean {
 	if (header.length < offset + magic.length) {
@@ -180,67 +138,9 @@ function parseWebpMetadata(header: Uint8Array): ImageMetadata | null {
 	return { mimeType: "image/webp" };
 }
 
-function parseBmpMetadata(header: Uint8Array): ImageMetadata | null {
-	if (!magicEquals(header, 0, BMP_MAGIC)) return null;
-	if (header.length < 26) return { mimeType: "image/bmp" };
-	const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
-	const width = view.getUint32(18, true);
-	const height = view.getUint32(22, true);
-	return { mimeType: "image/bmp", width: width || undefined, height: Math.abs(height || 0) || undefined };
-}
-
-function parseTiffMetadata(header: Uint8Array): ImageMetadata | null {
-	if (!magicEquals(header, 0, TIFF_LE_MAGIC) && !magicEquals(header, 0, TIFF_BE_MAGIC)) return null;
-	return { mimeType: "image/tiff" };
-}
-
-function parseSvgMetadata(header: Uint8Array): ImageMetadata | null {
-	// SVG is text-based; look for <svg tag in the first chunk
-	const text = new TextDecoder("utf-8", { fatal: true }).decode(header);
-	if (/<svg\b/i.test(text)) return { mimeType: "image/svg+xml" };
-	return null;
-}
-
-function parseHeicMetadata(header: Uint8Array): ImageMetadata | null {
-	// ISO BMFF: 4 bytes box size + "ftyp" + brand
-	if (header.length < 12) return null;
-	if (!magicEquals(header, 4, FTYP_MAGIC)) return null;
-	const brand = new TextDecoder().decode(header.subarray(8, 12)).toLowerCase().trim();
-	if (HEIC_BRANDS.has(brand)) return { mimeType: "image/heic" };
-	return null;
-}
-
-function parseIcoMetadata(header: Uint8Array): ImageMetadata | null {
-	if (!magicEquals(header, 0, ICO_MAGIC)) return null;
-	if (header.length < 8) return { mimeType: "image/x-icon" };
-	const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
-	const count = view.getUint16(4, true);
-	if (count === 0 || count > 256) return { mimeType: "image/x-icon" };
-	// First icon entry at offset 6: width, height, etc.
-	const w = header[6] || 0;
-	const h = header[7] || 0;
-	return { mimeType: "image/x-icon", width: w || undefined, height: h || undefined };
-}
-
-/**
- * Detect whether the file header looks like a PDF.
- * Does NOT return ImageMetadata — PDFs are documents, not images.
- */
-export function parsePdfMagic(header: Uint8Array): boolean {
-	return magicEquals(header, 0, PDF_MAGIC);
-}
-
 export function parseImageMetadata(header: Uint8Array): ImageMetadata | null {
 	return (
-		parsePngMetadata(header) ??
-		parseJpegMetadata(header) ??
-		parseGifMetadata(header) ??
-		parseWebpMetadata(header) ??
-		parseBmpMetadata(header) ??
-		parseTiffMetadata(header) ??
-		parseSvgMetadata(header) ??
-		parseHeicMetadata(header) ??
-		parseIcoMetadata(header)
+		parsePngMetadata(header) ?? parseJpegMetadata(header) ?? parseGifMetadata(header) ?? parseWebpMetadata(header)
 	);
 }
 
