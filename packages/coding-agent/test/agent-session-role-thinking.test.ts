@@ -106,7 +106,7 @@ describe("AgentSession role model thinking behavior", () => {
 
 		const firstSwitch = await session.cycleRoleModels(["default", "slow"]);
 		expect(firstSwitch?.role).toBe("slow");
-		expect(firstSwitch?.model.id).toBe(slowModel.id);
+		expect(firstSwitch?.model?.id).toBe(slowModel.id);
 		expect(firstSwitch?.thinkingLevel).toBe("off");
 		expect(session.thinkingLevel).toBe("off");
 
@@ -115,12 +115,12 @@ describe("AgentSession role model thinking behavior", () => {
 
 		const secondSwitch = await session.cycleRoleModels(["default", "slow"]);
 		expect(secondSwitch?.role).toBe("default");
-		expect(secondSwitch?.model.id).toBe(defaultModel.id);
+		expect(secondSwitch?.model?.id).toBe(defaultModel.id);
 		expect(session.thinkingLevel).toBe(Effort.High);
 
 		const thirdSwitch = await session.cycleRoleModels(["default", "slow"]);
 		expect(thirdSwitch?.role).toBe("slow");
-		expect(thirdSwitch?.model.id).toBe(slowModel.id);
+		expect(thirdSwitch?.model?.id).toBe(slowModel.id);
 		expect(thirdSwitch?.thinkingLevel).toBe("off");
 		expect(session.thinkingLevel).toBe("off");
 	});
@@ -140,7 +140,7 @@ describe("AgentSession role model thinking behavior", () => {
 
 		const toSmol = await session.cycleRoleModels(["default", "smol"]);
 		expect(toSmol?.role).toBe("smol");
-		expect(toSmol?.model.id).toBe(smolModel.id);
+		expect(toSmol?.model?.id).toBe(smolModel.id);
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
@@ -169,7 +169,7 @@ describe("AgentSession role model thinking behavior", () => {
 
 		const toDefault = await session.cycleRoleModels(["default", "slow"]);
 		expect(toDefault?.role).toBe("default");
-		expect(toDefault?.model.id).toBe(defaultModel.id);
+		expect(toDefault?.model?.id).toBe(defaultModel.id);
 		expect(toDefault?.thinkingLevel).toBe(Effort.Medium);
 		expect(session.thinkingLevel).toBe(Effort.Medium);
 	});
@@ -197,7 +197,7 @@ describe("AgentSession role model thinking behavior", () => {
 
 		const toSlow = await session.cycleRoleModels(["slow", "default", "smol"]);
 		expect(toSlow?.role).toBe("slow");
-		expect(toSlow?.model.id).toBe(slowPlanModel.id);
+		expect(toSlow?.model?.id).toBe(slowPlanModel.id);
 		expect(toSlow?.thinkingLevel).toBe(Effort.High);
 		expect(session.thinkingLevel).toBe(Effort.High);
 	});
@@ -774,7 +774,7 @@ describe("AgentSession role model thinking behavior", () => {
 		// and "switch" right back onto the model already running.
 		const result = await session.cycleRoleModels(["default", "slow"]);
 		expect(result?.role).toBe("slow");
-		expect(result?.model.id).toBe(slowModel.id);
+		expect(result?.model?.id).toBe(slowModel.id);
 		expect(session.model?.id).toBe(slowModel.id);
 	});
 });

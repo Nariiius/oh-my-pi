@@ -14,7 +14,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { blobExtensionForImageMimeType } from "./blob-store";
-import { type CustomMessage, convertToLlm } from "./messages";
+import { convertToLlm } from "./messages";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import type { SessionManager } from "./session-manager";
 
@@ -216,6 +216,7 @@ export class SessionProviderBoundary {
 	normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
 		return normalizeModelContextImages(images, { model: this.#host.model() });
 	}
+
 	/** Normalizes every image embedded in an agent message. */
 	async normalizeAgentMessageImages<T extends AgentMessage>(message: T): Promise<T> {
 		if (!("content" in message)) return message;

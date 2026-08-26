@@ -24,11 +24,10 @@ import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort 
 import {
 	ImageInputTooLargeError,
 	type InspectFileKind,
-	type LoadedInspectFile,
 	type LoadedImageInput,
-	loadAttachmentReferenceInput,
-	loadImageAttachmentInput,
+	type LoadedInspectFile,
 	loadFileForInspect,
+	loadImageAttachmentInput,
 	loadImageInput,
 	loadSvgImageInput,
 	MAX_IMAGE_INPUT_BYTES,
@@ -72,7 +71,7 @@ async function loadAttachmentReferenceInput(options: {
 	reference: ImageAttachmentReference;
 	attachments: readonly { label: string; uri: string; image: ImageContent }[];
 	autoResize: boolean;
-	excludeWebP: boolean;
+	excludeWebP: boolean | undefined;
 }): Promise<LoadedImageInput | null> {
 	const { path, reference, attachments } = options;
 	let targetImage: ImageContent | undefined;
@@ -107,6 +106,8 @@ async function loadAttachmentReferenceInput(options: {
 	return {
 		resolvedPath,
 		data: targetImage.data,
+		textNote: `[Image: ${resolvedPath}]`,
+		bytes: Buffer.from(targetImage.data, "base64").byteLength,
 		mimeType: targetImage.mimeType ?? "image/png",
 	};
 }
@@ -229,7 +230,9 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		const autoResize = this.session.settings.get("images.autoResize");
 		const excludeWebP = webpExclusionForModel(model);
 		const attachmentReference = parseImageAttachmentReference(params.path);
-		const imageTarget = attachmentReference ? undefined : await splitPathAndSelPreferringLiteral(params.path, this.session.cwd);
+		const imageTarget = attachmentReference
+			? undefined
+			: await splitPathAndSelPreferringLiteral(params.path, this.session.cwd);
 		const isSvgImage = imageTarget?.sel?.toLowerCase() === "img";
 
 		let imageInput: LoadedImageInput | null;
@@ -302,7 +305,8 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		// check is deferred until the kind is known: text-only models may still
 		// answer questions about text-bearing files (documents, extracted PDF
 		// text, source files).
-		const messageContent: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
+		const messageContent: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> =
+			[];
 
 		if (file.kind === "image" && file.imageData) {
 			if (!model.input.includes("image")) {

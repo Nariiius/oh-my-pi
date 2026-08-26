@@ -705,6 +705,9 @@ export class CustomEditor extends Editor {
 	onPasteImage?: () => Promise<boolean>;
 	/** Called when a bracketed paste contains one or more image-file paths. */
 	onPasteImagePath?: (path: string) => void | Promise<void>;
+	/** Called when a pasted string looks like a file path (starts with /, ~, or .).
+	 *  Return a replacement string to insert, or undefined to keep the raw path text. */
+	onPasteFilePath?: (path: string) => string | undefined;
 	/** Called when the configured raw text-paste shortcut is pressed. */
 	onPasteTextRaw?: () => void;
 	/** Called when the configured dequeue shortcut is pressed. */
@@ -966,6 +969,25 @@ export class CustomEditor extends Editor {
 					})(),
 				);
 				return;
+			}
+			// Allow the host to intercept pasted file paths (drag-drop, terminal path
+			// paste, file-url drops, etc.) and replace them with styled references or
+			// image markers.
+			if (this.onPasteFilePath) {
+				const trimmed = content.trim();
+				if (/^[/~.]/.test(trimmed)) {
+					const pathText = trimmed
+						.replace(/^['"](.+?)['"]$/s, "$1")
+						.replace(/^file:\/\//, "")
+						.replace(/\\([ ])/g, "$1");
+					const replacement = this.onPasteFilePath(pathText);
+					if (replacement !== undefined) {
+						this.pasteText(replacement);
+						const drainedNow = this.#pendingInput.splice(0);
+						for (const chunk of drainedNow) this.handleInput(chunk);
+						return;
+					}
+				}
 			}
 			this.pasteText(content);
 			// No async paste was started; drain the queued trailing bytes ourselves.

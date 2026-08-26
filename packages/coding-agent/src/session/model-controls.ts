@@ -407,14 +407,8 @@ export class ModelControls {
 
 		const currentModel = this.#model;
 		const lastRole = this.#host.sessionManager.getLastModelChangeRole();
-		let currentIndex = lastRole
-			? slots.findIndex(slot => slot.kind === "model" && slot.entry.role === lastRole)
-			: -1;
-		if (
-			currentIndex !== -1 &&
-			currentModel &&
-			slots[currentIndex]?.kind === "model"
-		) {
+		let currentIndex = lastRole ? slots.findIndex(slot => slot.kind === "model" && slot.entry.role === lastRole) : -1;
+		if (currentIndex !== -1 && currentModel && slots[currentIndex]?.kind === "model") {
 			const entry = slots[currentIndex];
 			if (entry.kind === "model" && !modelsAreEqual(entry.entry.model, currentModel)) {
 				currentIndex = -1;

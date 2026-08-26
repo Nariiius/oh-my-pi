@@ -196,7 +196,8 @@ describe("InspectImageTool", () => {
 		expect(Array.isArray(content)).toBe(true);
 		const contentParts = (Array.isArray(content) ? content : []) as Array<{ type: string; text?: string }>;
 		expect(contentParts[0]?.type).toBe("image");
-		expect(contentParts[1]).toEqual({ type: "text", text: "Extract visible UI labels." });
+		expect(contentParts[1]?.type).toBe("text");
+		expect(contentParts[1]?.text?.endsWith("Question: Extract visible UI labels.")).toBe(true);
 	});
 	it("rasterizes a selected SVG before sending it to the vision model", async () => {
 		const svgPath = path.join(testDir, "diagram.svg");
@@ -210,7 +211,7 @@ describe("InspectImageTool", () => {
 		});
 
 		expect(stub.calls).toHaveLength(1);
-		expect(result.details?.imagePath).toBe(svgPath);
+		expect(result.details?.filePath).toBe(svgPath);
 		expect(result.details?.mimeType).toBe("image/png");
 	});
 
@@ -255,7 +256,7 @@ describe("InspectImageTool", () => {
 			question: "Describe the pasted image.",
 		});
 
-		expect(result.details?.imagePath).toBe("attachment://1");
+		expect(result.details?.filePath).toBe("attachment://1");
 		expect(stub.calls).toHaveLength(1);
 		const request = stub.calls[0]?.[1] as { messages?: Array<{ content?: unknown }> } | undefined;
 		const attachmentContent = request?.messages?.[0]?.content;
@@ -294,8 +295,8 @@ describe("InspectImageTool", () => {
 			question: "Describe the second attachment.",
 		});
 
-		expect(bracketResult.details?.imagePath).toBe("attachment://1");
-		expect(uriResult.details?.imagePath).toBe("attachment://2");
+		expect(bracketResult.details?.filePath).toBe("attachment://1");
+		expect(uriResult.details?.filePath).toBe("attachment://2");
 	});
 
 	it("reports attachment-aware errors for missing image labels", async () => {
@@ -378,7 +379,8 @@ describe("InspectImageTool", () => {
 		const userMessage = request?.messages?.[0];
 		const content = userMessage?.content;
 		const contentParts = (Array.isArray(content) ? content : []) as Array<{ type: string; text?: string }>;
-		expect(contentParts[1]).toEqual({ type: "text", text: "What warning is shown?" });
+		expect(contentParts[1]?.type).toBe("text");
+		expect(contentParts[1]?.text?.endsWith("Question: What warning is shown?")).toBe(true);
 	});
 
 	it("registers custom renderer and shows question in terminal output", async () => {
@@ -402,7 +404,7 @@ describe("InspectImageTool", () => {
 				content: [{ type: "text", text: "line 1\nline 2\nline 3\nline 4\nline 5" }],
 				details: {
 					model: "openai/gpt-4o",
-					imagePath: "/tmp/screenshot.png",
+					filePath: "/tmp/screenshot.png",
 					mimeType: "image/png",
 				},
 			},

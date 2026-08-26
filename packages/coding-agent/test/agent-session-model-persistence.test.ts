@@ -234,7 +234,7 @@ describe("AgentSession model persistence", () => {
 		const result = await created.session.cycleRoleModels(["default", "slow"]);
 
 		expect(result?.role).toBe("slow");
-		expect(result?.model.id).toBe(slowModel.id);
+		expect(result?.model?.id).toBe(slowModel.id);
 		expect(created.session.model?.id).toBe(slowModel.id);
 		expect(created.settings.getModelRole("default")).toBe(defaultRoleValue);
 		expect(created.settings.getModelRole("slow")).toBe(slowRoleValue);

@@ -1,5 +1,4 @@
 import * as fsSync from "node:fs";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -16,7 +15,6 @@ import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { TreeSelectorComponent } from "../../modes/components/tree-selector";
 import { chipLabel, compactImageMarkers, shiftImageMarkers } from "../../modes/composer-attachments";
 import { expandEmoticons } from "../../modes/emoji-autocomplete";
-import { materializeImageReferenceLinks, setCachedImageDimensions } from "../../modes/image-references";
 import {
 	filterAndRenumberReferencedImages,
 	materializeImageReferenceLinks,

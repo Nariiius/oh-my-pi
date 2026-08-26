@@ -2076,9 +2076,7 @@ export class EventController {
 				if (terminalError) this.ctx.showPinnedError(terminalError);
 				this.#restorePinnedErrorInline = true;
 			} else {
-				this.ctx.showError(
-					`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`,
-				);
+				this.ctx.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 			}
 			this.#lastChatError = event.finalError;
 		}

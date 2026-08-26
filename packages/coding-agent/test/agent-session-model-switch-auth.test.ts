@@ -102,7 +102,7 @@ describe("AgentSession model switch auth pre-flight", () => {
 		const result = await s.cycleRoleModels(["default", "slow"]);
 
 		expect(result?.role).toBe("slow");
-		expect(result?.model.id).toBe(slow.id);
+		expect(result?.model?.id).toBe(slow.id);
 		expect(s.model?.id).toBe(slow.id);
 		expect(getApiKeySpy).not.toHaveBeenCalled();
 	});

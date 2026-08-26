@@ -727,7 +727,7 @@ export const SETTINGS_SCHEMA = {
 	// Composer
 	"composer.shape": {
 		type: "string",
-		default: "box",
+		default: "pi",
 		ui: {
 			tab: "appearance",
 			group: "Composer",

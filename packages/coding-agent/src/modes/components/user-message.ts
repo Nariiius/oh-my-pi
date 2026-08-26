@@ -1,7 +1,5 @@
-import { type Component, Container, Markdown } from "@oh-my-pi/pi-tui";
-
+import { Box, type Component, Container, Markdown } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
-import { Box, Container, Markdown } from "@oh-my-pi/pi-tui";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { attachmentSgr, collapseImageMarkers, renderPlaceholders } from "../composer-attachments";
 import { imageReferenceHyperlink } from "../image-references";
