@@ -6,6 +6,7 @@ import {
 	Editor,
 	type EditorTextDecorationContext,
 	type EditorTheme,
+	isNativeModifierPressed,
 	type KeyId,
 	parseKey,
 	parseKittySequence,
@@ -997,7 +998,14 @@ export class CustomEditor extends Editor {
 		}
 
 		const parsedKey = parseKey(data);
-		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
+		let canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
+
+		// macOS: terminal wire formats never carry Cmd — parseKey only sees the
+		// bare key (plus ctrl/alt/shift). Probe the native modifier state so
+		// `super+<key>` bindings (Cmd+O model picker, Cmd+V paste) actually match.
+		if (canonical !== undefined && isNativeModifierPressed("command")) {
+		canonical = canonicalKeyId(`super+${canonical}`);
+		}
 
 		// Left-arrow on an empty editor: surface for the agent-hub double-tap
 		// gesture. Plain "left" only — modified arrows and any in-text cursor
