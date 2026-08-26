@@ -74,6 +74,15 @@ export function getDefaultPasteImageKeys(platform: NodeJS.Platform = process.pla
 }
 
 /**
+ * Resolve default model-selector shortcuts for the current terminal platform.
+ * macOS exposes the selector on Cmd+P (super+p); other platforms keep Alt+M.
+ */
+export function getDefaultModelSelectKeys(platform: NodeJS.Platform = process.platform): KeyId[] {
+	if (platform === "darwin") return ["alt+m", "super+p"];
+	return ["alt+m"];
+}
+
+/**
  * All keybindings definitions: TUI + app-specific.
  */
 export const KEYBINDINGS = {
@@ -115,7 +124,7 @@ export const KEYBINDINGS = {
 		description: "Cycle to previous model",
 	},
 	"app.model.select": {
-		defaultKeys: "alt+m",
+		defaultKeys: getDefaultModelSelectKeys(),
 		description: "Select model",
 	},
 	"app.model.selectTemporary": {
