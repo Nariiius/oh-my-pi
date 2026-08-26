@@ -65,6 +65,7 @@ import {
 	Settings,
 	settings,
 } from "../config/settings";
+import { DEFAULT_COMPOSER_SHAPE } from "../config/settings-schema";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
 	AutocompleteProviderFactory,
@@ -850,7 +851,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.settings = session.settings;
 		const preferences = {
 			quiet: settings.get("startup.quiet"),
-			composerShape: settings.get("composer.shape") ?? "box",
+			composerShape: settings.get("composer.shape") ?? DEFAULT_COMPOSER_SHAPE,
 			showHardwareCursor: settings.get("showHardwareCursor"),
 			maxInlineImages: settings.get("tui.maxInlineImages"),
 			resizeScrollback: settings.get("tui.resizeScrollback"),
@@ -2039,7 +2040,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 	syncComposerShape(): void {
-		const shape = settings.get("composer.shape") ?? "box";
+		const shape = settings.get("composer.shape") ?? DEFAULT_COMPOSER_SHAPE;
 		const style = getComposerStyle(shape);
 		this.composer.setPreferences({ composerShape: shape });
 		this.statusLine.setAutocompleteActiveProbe(() => this.editor.isAutocompleteActive());

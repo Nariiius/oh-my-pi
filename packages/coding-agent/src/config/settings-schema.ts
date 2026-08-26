@@ -102,6 +102,9 @@ const BLOB_BACKEND_CHOICES = BUILTIN_BLOB_DESTINATION_METADATA.filter(
 /** Composer shape id; extensions may register additional values at runtime. */
 export type ComposerShape = string;
 
+/** Default composer shape; mirrors `composer.shape`'s schema default. */
+export const DEFAULT_COMPOSER_SHAPE: ComposerShape = "pi";
+
 /** Built-in composer choices and their shared settings/setup copy. */
 export const BUILTIN_COMPOSER_SHAPES = [
 	{

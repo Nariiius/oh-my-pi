@@ -45,6 +45,7 @@ import {
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
+import { DEFAULT_COMPOSER_SHAPE } from "./config/settings-schema";
 import { initializeWithSettings } from "./discovery";
 import {
 	clearPluginRootsAndCaches,
@@ -1520,7 +1521,7 @@ export async function runRootCommand(
 
 		applyStartupComposerPreferences({
 			quiet: settingsInstance.get("startup.quiet"),
-			composerShape: settingsInstance.get("composer.shape") ?? "box",
+			composerShape: settingsInstance.get("composer.shape") ?? DEFAULT_COMPOSER_SHAPE,
 			showHardwareCursor: settingsInstance.get("showHardwareCursor"),
 			maxInlineImages: settingsInstance.get("tui.maxInlineImages"),
 			resizeScrollback: settingsInstance.get("tui.resizeScrollback"),
