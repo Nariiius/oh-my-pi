@@ -75,8 +75,7 @@ export function getDefaultPasteImageKeys(platform: NodeJS.Platform = process.pla
 
 /**
  * Resolve default model-selector shortcuts for the current terminal platform.
- * macOS exposes the temporary session-only picker on Cmd+P (super+p) so the
- * quick gesture never persists; other platforms keep Alt+M for the hub.
+ * macOS keeps the persistent hub on Alt+M; other platforms mirror it.
  */
 export function getDefaultModelSelectKeys(platform: NodeJS.Platform = process.platform): KeyId[] {
 	if (platform === "darwin") return ["alt+m"];
@@ -85,7 +84,7 @@ export function getDefaultModelSelectKeys(platform: NodeJS.Platform = process.pl
 
 /** Shortcuts for the session-only (non-persisted) model picker. */
 export function getDefaultModelSelectTemporaryKeys(platform: NodeJS.Platform = process.platform): KeyId[] {
-	if (platform === "darwin") return ["alt+p", "super+p"];
+	if (platform === "darwin") return ["alt+p", "super+o"];
 	return ["alt+p"];
 }
 
