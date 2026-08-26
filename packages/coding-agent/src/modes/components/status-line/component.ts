@@ -344,6 +344,8 @@ function hasGitBackedSegment(segments: readonly StatusLineSegmentId[]): boolean 
 export class StatusLineComponent implements Component {
 	#standalone: false | "full" | "left-only" = false;
 	#standaloneGap = false;
+	/** Two-line footer (path line + stats/model line) instead of the single-line bottom bar. */
+	#twoLineFooter = false;
 	#autocompleteActiveProbe: (() => boolean) | undefined;
 	#renderRevision = 0;
 	#settings: StatusLineSettings = {};
@@ -2217,6 +2219,11 @@ export class StatusLineComponent implements Component {
 	 * `bottomBarGap` inserts a blank spacer row above the bar for styles whose
 	 * editor has no bottom chrome.
 	 */
+	/** When true, the standalone bottom bar renders as the two-line Pi-style footer. */
+	setTwoLineFooter(enabled: boolean): void {
+		this.#twoLineFooter = enabled;
+	}
+
 	setComposerStyle(style: Pick<ComposerStyle, "bottomBar" | "bottomBarGap">): void {
 		this.#standalone = style.bottomBar === "none" ? false : style.bottomBar === "left" ? "left-only" : "full";
 		this.#standaloneGap = style.bottomBarGap;
@@ -2284,6 +2291,10 @@ export class StatusLineComponent implements Component {
 			if (rule !== undefined) lines.push(rule);
 		}
 		if (bottomBar !== "none") {
+			if (this.#twoLineFooter) {
+				lines.push(...this.#buildFooterLines(width));
+				return lines;
+			}
 			const main = this.renderBottomBar(width, bottomBar);
 			if (main) lines.push(main);
 		}
@@ -2293,10 +2304,15 @@ export class StatusLineComponent implements Component {
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
 		if (this.#standalone && !this.#autocompleteActiveProbe?.()) {
-			const content = this.renderBottomBar(width, this.#standalone === "left-only" ? "left" : "full");
-			if (content) {
+			if (this.#twoLineFooter) {
 				if (this.#standaloneGap) lines.push("");
-				lines.push(content);
+				lines.push(...this.#buildFooterLines(width));
+			} else {
+				const content = this.renderBottomBar(width, this.#standalone === "left-only" ? "left" : "full");
+				if (content) {
+					if (this.#standaloneGap) lines.push("");
+					lines.push(content);
+				}
 			}
 		}
 		const showHooks = this.#settings.showHookStatus ?? true;
@@ -2306,6 +2322,72 @@ export class StatusLineComponent implements Component {
 				.map(([, text]) => truncateToWidth(sanitizeStatusText(text), width));
 			lines.push(...hookLines);
 		}
+		return lines;
+	}
+
+	/** Pi-style two-line footer: path line, then cost/context left + model right. */
+	#buildFooterLines(width: number): string[] {
+		const lines: string[] = [];
+		const sm = this.session.sessionManager;
+
+		// ── Line 1: Path ────────────────────────────────────────────
+		const cwd = sm?.getCwd();
+		const branch = this.#getCurrentBranch();
+		const sessionName = sm?.getSessionName();
+
+		let pwd = cwd ?? "";
+		if (pwd) {
+			const home = process.env.HOME || process.env.USERPROFILE;
+			if (home && pwd.startsWith(home)) pwd = `~${pwd.slice(home.length)}`;
+		}
+		if (branch) pwd = `${pwd} (${branch})`;
+
+		const pathWidth = visibleWidth(pwd);
+		const nameStr = sessionName ? ` \u2022 ${sessionName}` : "";
+		const nameWidth = visibleWidth(nameStr);
+		if (pathWidth + nameWidth <= width) {
+			const pad = " ".repeat(width - pathWidth - nameWidth);
+			lines.push(theme.fg("dim", pwd + pad + nameStr));
+		} else {
+			lines.push(theme.fg("dim", truncateToWidth(`${pwd}${nameStr}`, width)));
+		}
+
+		// ── Line 2: Stats + context + model ────────────────────────
+		const stats = sm?.getUsageStatistics?.() ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		const fmt = (n: number) =>
+			n < 1000 ? `${n}` : n < 10000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n / 1000)}k`;
+
+		const parts: string[] = [];
+		if (stats.cost) parts.push(theme.fg("dim", `$${stats.cost.toFixed(3)}`));
+
+		// Color-coded context (green < 70%, yellow 70-90%, red > 90%)
+		const ctx = this.session.getContextUsage?.();
+		const cw = ctx?.contextWindow ?? this.session.state.model?.contextWindow ?? 0;
+		const cpv = ctx?.percent ?? 0;
+		const cp = ctx?.percent !== null && ctx?.percent !== undefined ? cpv.toFixed(1) : "?";
+		const ai = this.#autoCompactEnabled ? " (auto)" : "";
+		const cd = cw > 0 ? `${cp}%/${fmt(cw)}${ai}` : `${cp}%${ai}`;
+		const color = cpv > 90 ? "error" : cpv > 70 ? "warning" : cpv > 0 ? "success" : "dim";
+		parts.push(theme.fg(color, cd));
+
+		const left = parts.join(" ");
+
+		// Model (right-aligned)
+		const mn = this.session.state.model?.name ?? this.session.state.model?.id ?? "Unknown";
+		const tl = this.session.state.thinkingLevel;
+		const mr = tl ? `${mn} \u2022 ${tl}` : mn;
+		const lw = visibleWidth(left);
+		const rw = visibleWidth(mr);
+		const line =
+			lw + rw + 2 <= width
+				? left + " ".repeat(width - lw - rw) + mr
+				: width - lw - 2 > 0
+					? left +
+						" ".repeat(Math.max(0, width - lw - visibleWidth(truncateToWidth(mr, width - lw - 2)))) +
+						truncateToWidth(mr, width - lw - 2)
+					: truncateToWidth(left, width);
+		lines.push(line);
+
 		return lines;
 	}
 }

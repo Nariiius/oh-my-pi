@@ -2057,6 +2057,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				break;
 		}
 		this.statusLine.setComposerStyle(style);
+		// The custom five-style two-line footer ships with the Pi compose shape.
+		this.statusLine.setTwoLineFooter(style.id === "pi");
 		this.updateEditorBorderColor();
 		this.ui.requestRender();
 	}
