@@ -24,6 +24,31 @@ type ModelUsageRow = {
 };
 
 /** Row shape for model_perf table queries */
+type ModelProbeRow = {
+	model_key: string;
+	ok: number;
+	latency_ms: number;
+	error: string | null;
+	probed_at: number;
+};
+
+/** One model's verdict from the last probe run. */
+export interface ModelProbeRecord {
+	ok: boolean;
+	latencyMs: number;
+	error?: string;
+	/** Epoch milliseconds of the probe that produced this verdict. */
+	probedAt: number;
+}
+
+/** Verdict payload for {@link AgentStorage.recordModelProbeResults}. */
+export interface ModelProbeInput {
+	selector: string;
+	ok: boolean;
+	latencyMs: number;
+	error?: string;
+}
+
 type ModelPerfRow = {
 	model_key: string;
 	samples: number;
@@ -136,6 +161,8 @@ export class AgentStorage {
 	#listModelUsageStmt: Statement;
 	#upsertModelPerfStmt: Statement;
 	#listModelPerfStmt: Statement;
+	#upsertModelProbeStmt: Statement;
+	#listModelProbeStmt: Statement;
 	#upsertCommandUsageStmt: Statement;
 	#listCommandUsageStmt: Statement;
 	#modelUsageCache: string[] | null = null;
@@ -191,6 +218,18 @@ ON CONFLICT(model_key) DO UPDATE SET
 		this.#listModelPerfStmt = this.#db.prepare(
 			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf",
 		);
+		this.#upsertModelProbeStmt = this.#db.prepare(
+			`INSERT INTO model_probe_results (model_key, ok, latency_ms, error, probed_at)
+VALUES (?1, ?2, ?3, ?4, ${SQLITE_NOW_EPOCH})
+ON CONFLICT(model_key) DO UPDATE SET
+	ok = excluded.ok,
+	latency_ms = excluded.latency_ms,
+	error = excluded.error,
+	probed_at = ${SQLITE_NOW_EPOCH}`,
+		);
+		this.#listModelProbeStmt = this.#db.prepare(
+			"SELECT model_key, ok, latency_ms, error, probed_at FROM model_probe_results",
+		);
 		this.#upsertCommandUsageStmt = this.#db.prepare(
 			`INSERT INTO command_usage (name, count, last_used_at) VALUES (?, 1, ${SQLITE_NOW_EPOCH})
 ON CONFLICT(name) DO UPDATE SET count = command_usage.count + 1, last_used_at = ${SQLITE_NOW_EPOCH}`,
@@ -227,6 +266,14 @@ CREATE TABLE IF NOT EXISTS model_perf (
 	ttft_samples REAL NOT NULL DEFAULT 0,
 	ttft_ms REAL NOT NULL DEFAULT 0,
 	updated_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
+);
+
+CREATE TABLE IF NOT EXISTS model_probe_results (
+	model_key TEXT PRIMARY KEY,
+	ok INTEGER NOT NULL,
+	latency_ms INTEGER NOT NULL DEFAULT 0,
+	error TEXT,
+	probed_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
 );
 
 CREATE TABLE IF NOT EXISTS command_usage (
@@ -414,6 +461,8 @@ FROM model_usage_legacy
 		this.#listModelUsageStmt.finalize();
 		this.#upsertModelPerfStmt.finalize();
 		this.#listModelPerfStmt.finalize();
+		this.#upsertModelProbeStmt.finalize();
+		this.#listModelProbeStmt.finalize();
 		this.#upsertCommandUsageStmt.finalize();
 		this.#listCommandUsageStmt.finalize();
 		// SqliteAuthCredentialStore.close() finalizes its own statements and
@@ -563,6 +612,47 @@ FROM model_usage_legacy
 			logger.warn("AgentStorage failed to read model perf", { error: String(error) });
 		}
 		return stats;
+	}
+
+	/**
+	 * Overwrites the stored probe verdicts with one batch (a probe run). Keyed
+	 * by "provider/modelId" selector; models absent from the batch keep their
+	 * previous verdict, so partial runs (view closed early) only refresh the
+	 * models they actually probed.
+	 */
+	recordModelProbeResults(results: ReadonlyArray<ModelProbeInput>): void {
+		if (results.length === 0) return;
+		try {
+			const stmt = this.#upsertModelProbeStmt;
+			this.#db.transaction((batch: ReadonlyArray<ModelProbeInput>) => {
+				for (const result of batch) {
+					stmt.run(result.selector, result.ok ? 1 : 0, result.latencyMs, result.error ?? null);
+				}
+			})(results);
+		} catch (error) {
+			logger.warn("AgentStorage failed to record model probe results", { error: String(error) });
+		}
+	}
+
+	/**
+	 * Verdicts of the last probe run, keyed by "provider/modelId" selector.
+	 * Read by the model browser (picker / Model Hub) to mark working models.
+	 */
+	getModelProbeResults(): Map<string, ModelProbeRecord> {
+		const records = new Map<string, ModelProbeRecord>();
+		try {
+			for (const row of this.#listModelProbeStmt.all() as ModelProbeRow[]) {
+				records.set(row.model_key, {
+					ok: row.ok !== 0,
+					latencyMs: row.latency_ms,
+					...(row.error ? { error: row.error } : {}),
+					probedAt: row.probed_at,
+				});
+			}
+		} catch (error) {
+			logger.warn("AgentStorage failed to read model probe results", { error: String(error) });
+		}
+		return records;
 	}
 
 	/**

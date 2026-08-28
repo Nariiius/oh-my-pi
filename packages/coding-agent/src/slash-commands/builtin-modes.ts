@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { formatProbeResultsText, parseModelsProbeArgs, runModelsProbeSlash } from "../cli/models-cli";
 import {
 	expandRoleAlias,
 	formatModelString,
@@ -350,12 +351,39 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "model",
 		description: "Switch model for this session",
 		acpDescription: "Show current model selection",
+		allowArgs: true,
+		subcommands: [
+			{
+				name: "probe",
+				description: "Check which models actually respond",
+				usage: "[pattern] [--apply]",
+			},
+		],
 		getTuiAutocompleteDescription: runtime => {
 			const model = runtime.ctx.session.model;
 			return model ? `Model: ${model.provider}/${model.id}` : "Model: none selected";
 		},
 		handle: async (command, runtime) => {
 			if (command.args) {
+				const [first, ...rest] = command.args.trim().split(/\s+/);
+				if (first === "probe") {
+					const run = await runModelsProbeSlash({
+						modelRegistry: runtime.session.modelRegistry,
+						settings: runtime.settings,
+						args: rest.join(" "),
+					});
+					if (run.models.length === 0) {
+						await runtime.output(
+							run.pattern ? `No models matching "${run.pattern}" to probe` : "No models available to probe.",
+						);
+						return commandConsumed();
+					}
+					if (run.applyRequested && !run.applied) {
+						await runtime.output("No models responded — enabledModels left unchanged.");
+					}
+					await runtime.output(formatProbeResultsText(run.results, run.applied));
+					return commandConsumed();
+				}
 				const modelId = command.args.trim();
 				const availableModels = runtime.session.getAvailableModels?.() ?? [];
 				const match = availableModels.find(
@@ -384,9 +412,14 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			);
 			return commandConsumed();
 		},
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showModelSelector();
+		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
+			const [first, ...rest] = command.args.trim().split(/\s+/);
+			if (first === "probe") {
+				runtime.ctx.showModelsProbe(parseModelsProbeArgs(rest.join(" ")));
+				return;
+			}
+			runtime.ctx.showModelSelector();
 		},
 	},
 	{

@@ -165,6 +165,7 @@ export class ModelPickerComponent implements Component {
 		this.#browser.setRoles(roles);
 		this.#browser.setMruOrder(mruOrder);
 		this.#browser.setPerfStats(storage?.getModelPerf() ?? new Map());
+		this.#browser.setProbeResults(storage?.getModelProbeResults() ?? new Map());
 		this.#syncItemsForQuery(this.#browser.query, true);
 	}
 

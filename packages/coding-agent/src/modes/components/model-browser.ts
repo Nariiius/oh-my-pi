@@ -25,7 +25,7 @@ import { formatNumber } from "@oh-my-pi/pi-utils";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
-import type { ModelPerfStats } from "../../session/agent-storage";
+import type { ModelPerfStats, ModelProbeRecord } from "../../session/agent-storage";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../../thinking";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
@@ -354,6 +354,8 @@ export class ModelBrowser implements Component {
 	#roles: RoleAssignments = {};
 	#mruOrder: ReadonlyArray<string> = [];
 	#perf: ReadonlyMap<string, ModelPerfStats> = new Map();
+	/** Verdicts of the last probe run, keyed by `provider/id` selector. */
+	#probe: ReadonlyMap<string, ModelProbeRecord> = new Map();
 	#selectedIndex = 0;
 	#hoveredIndex: number | null = null;
 	#maxVisible = 10;
@@ -413,6 +415,11 @@ export class ModelBrowser implements Component {
 	/** Measured TPS/TTFT averages keyed by `provider/id` selector (see AgentStorage.getModelPerf). */
 	setPerfStats(perf: ReadonlyMap<string, ModelPerfStats>): void {
 		this.#perf = perf;
+	}
+
+	/** Probe-run verdicts keyed by `provider/id` selector (see AgentStorage.getModelProbeResults). */
+	setProbeResults(probe: ReadonlyMap<string, ModelProbeRecord>): void {
+		this.#probe = probe;
 	}
 
 	setMaxVisible(rows: number): void {
@@ -741,10 +748,16 @@ export class ModelBrowser implements Component {
 				: item.id;
 		const currentMark =
 			item.selector === this.#currentSelector ? ` ${theme.fg("success", theme.status.enabled)}` : "";
+		const probeRecord = this.#probe.get(item.selector);
+		const probeMark = probeRecord
+			? probeRecord.ok
+				? ` ${theme.fg("success", `${theme.status.enabled}${formatProbeAge(probeRecord.probedAt)}`)}`
+				: ` ${theme.fg("error", `${theme.status.disabled}${formatProbeAge(probeRecord.probedAt)}`)}`
+			: "";
 		const overLimit = overContext
 			? ` ${theme.status.disabled} context>${formatNumber(item.model.contextWindow ?? 0).toLowerCase()}`
 			: "";
-		let left = `${prefix}${providerPrefix}${name}${currentMark}${overLimit}`;
+		let left = `${prefix}${providerPrefix}${name}${currentMark}${probeMark}${overLimit}`;
 
 		// Perf column collapses entirely when no visible row has measurements.
 		const perfCol =
@@ -785,6 +798,13 @@ export class ModelBrowser implements Component {
 		if (perf) {
 			facts.push(`~${formatTps(perf.tps)}`);
 			if (perf.ttftMs !== null) facts.push(`${formatTtft(perf.ttftMs)} ttft`);
+		}
+		const probe = this.#probe.get(selected.selector);
+		if (probe) {
+			const age = formatProbeAge(probe.probedAt);
+			facts.push(
+				probe.ok ? `probe OK ${age} ago` : `probe FAIL ${age} ago${probe.error ? ` — ${probe.error}` : ""}`,
+			);
 		}
 		const line1 = truncateToWidth(theme.fg("muted", `  ${facts.join(" · ")}`), width);
 
@@ -885,4 +905,12 @@ export class ModelBrowser implements Component {
 	}
 
 	invalidate(): void {}
+}
+/** Compact relative age for probe marks: `now`, `4m`, `3h`, `2d`. */
+function formatProbeAge(probedAt: number, now: number = Date.now()): string {
+	const delta = Math.max(0, now - probedAt);
+	if (delta < 60_000) return "now";
+	if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m`;
+	if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h`;
+	return `${Math.floor(delta / 86_400_000)}d`;
 }

@@ -16,6 +16,13 @@ import {
 import { reset as resetCapabilities } from "../../capability";
 import { showGitOverlay } from "../../cli/git-tui";
 import {
+	createModelProbe,
+	filterModelsByPattern,
+	type ModelProbeResult,
+	type ModelsProbeArgs,
+	recordProbeResults,
+} from "../../cli/models-cli";
+import {
 	formatModelSelectorValue,
 	resolveAdvisorRoleSelection,
 	resolveModelRoleValue,
@@ -94,6 +101,7 @@ import { LoginDialogComponent } from "../components/login-dialog";
 import { LogoutAccountSelectorComponent } from "../components/logout-account-selector";
 import { ModelHubComponent, type ModelRoleSelectionScope } from "../components/model-hub";
 import { ModelPickerComponent } from "../components/model-picker";
+import { ModelsProbePanelComponent } from "../components/models-probe-panel";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
@@ -752,6 +760,61 @@ export class SelectorController {
 			return;
 		}
 		this.#showModelHub({});
+	}
+
+	/**
+	 * `/model probe` — fullscreen live probe view (same shell as `/settings`
+	 * and the Model Hub). Probes every (pattern-filtered) available model while
+	 * the overlay is open; space toggles a model's enabled state, Enter applies
+	 * the toggled selectors to `enabledModels` and closes, Esc closes (applying
+	 * the toggles when `--apply` was passed).
+	 */
+	showModelsProbe(options?: ModelsProbeArgs): void {
+		const registry = this.ctx.session.modelRegistry;
+		const models = filterModelsByPattern(registry.getAvailable(), options?.pattern);
+		if (models.length === 0) {
+			this.ctx.showStatus(
+				options?.pattern ? `No models matching "${options.pattern}" to probe` : "No models available to probe.",
+			);
+			return;
+		}
+
+		const timeoutMs = Math.max(1, Math.round((options?.timeoutSeconds ?? 20) * 1000));
+		const abort = new AbortController();
+		let overlayHandle: OverlayHandle | undefined;
+		const panel = new ModelsProbePanelComponent(
+			this.ctx.ui,
+			{
+				models,
+				probeModel: createModelProbe(registry, timeoutMs, undefined, abort.signal),
+				autoApply: options?.apply ?? false,
+			},
+			{
+				onClose: async selectors => {
+					if (selectors !== null && selectors.length > 0) {
+						this.ctx.settings.set("enabledModels", selectors);
+						await this.ctx.settings.flush();
+					}
+					recordProbeResults(
+						this.ctx.settings,
+						panel.getResults().filter((result): result is ModelProbeResult => result !== undefined),
+					);
+					abort.abort();
+					panel.dispose();
+					overlayHandle?.hide();
+					this.focusActiveEditorArea();
+					this.ctx.ui.requestRender();
+					if (selectors !== null) {
+						this.ctx.showStatus(
+							selectors.length > 0
+								? `Applied ${selectors.length} model${selectors.length === 1 ? "" : "s"} to enabledModels`
+								: "No models enabled — enabledModels left unchanged",
+						);
+					}
+				},
+			},
+		);
+		overlayHandle = this.#showFullscreenMenu(panel);
 	}
 
 	/**

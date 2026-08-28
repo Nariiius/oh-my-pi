@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -102,5 +103,43 @@ describe("ModelBrowser perf display", () => {
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 
 		expect(renderPlain(browser, 120)[2]).not.toContain("t/s");
+	});
+});
+
+describe("ModelBrowser probe marks", () => {
+	function plain(browser: ModelBrowser): string {
+		return stripVTControlCharacters(browser.render(100).join("\n"));
+	}
+
+	test("renders a probe verdict mark with age next to the model name", () => {
+		const models = [makeModel("prov-a", "works"), makeModel("prov-a", "dead")];
+		const browser = makeBrowser(models, []);
+		const now = Date.now();
+		browser.setProbeResults(
+			new Map([
+				["prov-a/works", { ok: true, latencyMs: 1200, probedAt: now - 2 * 3_600_000 }],
+				["prov-a/dead", { ok: false, latencyMs: 5000, error: "HTTP 402: quota", probedAt: now - 5 * 60_000 }],
+			]),
+		);
+
+		const out = plain(browser);
+		expect(out).toContain("prov-a/works");
+		expect(out).toContain("2h");
+		expect(out).toContain("prov-a/dead");
+		expect(out).toContain("5m");
+	});
+
+	test("detail lines show the probe verdict and failure error", () => {
+		const models = [makeModel("prov-a", "dead")];
+		const browser = makeBrowser(models, []);
+		browser.setProbeResults(
+			new Map([
+				["prov-a/dead", { ok: false, latencyMs: 5000, error: "HTTP 402: quota", probedAt: Date.now() - 60_000 }],
+			]),
+		);
+
+		const out = plain(browser);
+		expect(out).toContain("probe FAIL");
+		expect(out).toContain("HTTP 402: quota");
 	});
 });

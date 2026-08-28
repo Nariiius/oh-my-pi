@@ -53,6 +53,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "../capability";
+import type { ModelsProbeArgs } from "../cli/models-cli";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
@@ -5182,6 +5183,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
 		return this.#commandController.handleUsageCommand(reports);
+	}
+
+	showModelsProbe(options?: ModelsProbeArgs): void {
+		this.#selectorController.showModelsProbe(options);
 	}
 
 	async handleChangelogCommand(showFull = false): Promise<void> {

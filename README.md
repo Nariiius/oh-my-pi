@@ -423,6 +423,35 @@ modelRoles:
   default: spark/minimax-m3
 ```
 
+### Prove a model actually answers
+
+Discovery lists every model an endpoint advertises — but quota walls, WAF
+handshakes, and dead backends only show up when a request actually goes out.
+`omp models probe` sends a minimal one-word request through omp's own routing
+(the exact auth, headers, and wire format a real session uses — every API
+family: completions, responses, anthropic, codex, gemini, bedrock, vertex) to
+every available model and reports what answers:
+
+```
+$ omp models probe agentrouter
+[1/5] agentrouter/gpt-5.6-sol
+[2/5] agentrouter/deepseek-v4-flash
+…
+  OK   agentrouter/deepseek-v4-flash (1.7s)
+  FAIL agentrouter/gpt-5.6-sol (0.5s) — HTTP 402: Budget pool quota has been exhausted
+  FAIL agentrouter/gpt-5.5 (20.0s) — Request was aborted
+2/5 models responded. Run with --apply to write the working models to enabledModels.
+```
+
+`--apply` writes the working `provider/model` selectors to `enabledModels` so
+only responding models stay selectable (an empty result never wipes the list);
+`--json` emits machine-readable results. Inside a session, `/model probe` (or
+`/models probe`) opens a fullscreen live view: rows flip to OK/FAIL as probes
+land, failed models collapse under a `Failed (N)` row and stay unselectable,
+`space` toggles working models, `Enter` applies the selection. Every probe run
+is recorded, and the model picker (`Ctrl+P`, `/model`) marks each model with
+its last verdict and age — `●2h` passed, `⦸5m` failed.
+
 ### Four knobs that make routing useful
 
 - **Custom providers** — Declare anything that speaks `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, `google-gemini-cli`, or `google-vertex` in `~/.omp/agent/models.yml`.

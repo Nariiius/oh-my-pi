@@ -344,6 +344,7 @@ export class ModelHubComponent implements Component {
 		this.#browser.setRoles(this.#roles);
 		this.#browser.setMruOrder(mruOrder);
 		this.#browser.setPerfStats(storage?.getModelPerf() ?? new Map());
+		this.#browser.setProbeResults(storage?.getModelProbeResults() ?? new Map());
 
 		const bySelector = new Map(this.#availableItems.map(item => [item.selector, item]));
 		this.#recentItems = [];
