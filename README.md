@@ -3,7 +3,7 @@
 
 # Personal fork (`local-custom-v18`)
 
-A local checkout of omp with a small UI/keybinding layer on top. Everything else is upstream.
+A local checkout of omp with a small UI/keybinding layer plus model-probe tooling on top. Everything else is upstream.
 
 ## What is different
 
@@ -13,6 +13,8 @@ A local checkout of omp with a small UI/keybinding layer on top. Everything else
 | Persistent model hub | `Alt+M` | `Alt+M` (unchanged) |
 | Composer / footer | Default composer shape is `box` | Default composer shape is **Pi**: two-line footer (cwd on one line, model/thinking/folder/cost on the next) |
 | Model picker | Standard selector | Adds a **cycle-selection slot** so you can pick the model that `Ctrl+P` / `Ctrl+Shift+P` rotate through, separately from the session-only picker |
+| `omp models probe` / `/model probe` | Not present | New: sends a minimal one-word request through omp's own routing to every available model (all API families) and reports which ones actually respond. `--apply` writes the working `provider/model` selectors to `enabledModels`; `--json` / `--timeout` for scripted runs. Inside a session, `/model probe` opens a fullscreen live view — rows flip to OK/FAIL as probes land, failed models collapse under a `Failed (N)` row and stay unselectable, `space` toggles working models, `Enter` applies. Verdicts persist, and the model picker / Model Hub mark each model with its last result and age (`●2h` passed, `⦸5m` failed) |
+| Composer file attachments | Paste text only | New: **file attachment chips** — file icon, byte-size caption, and file interior rendering in the composer |
 
 Also kept from this branch: file-paste in the composer actually applies; the image/PDF path matches upstream v18 (no extra vision-fallback setting).
 
