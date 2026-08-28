@@ -395,10 +395,26 @@ export interface TextAttachment {
 	charCount: number;
 }
 
+/** A file linked into the composer as a chip. The submit-time expansion (an `@`-mention
+ *  resolved by the auto-read pipeline) lives in the editor's atom table under `label`. */
+export interface FileAttachment {
+	n: number;
+	label: string;
+	path: string;
+	basename: string;
+	size: number | undefined;
+}
+
+/** Last path segment (POSIX or Windows separator) — used for file-chip card captions. */
+function basename(filePath: string): string {
+	return filePath.split(/[\\/]/).pop() ?? filePath;
+}
+
 /** One visible composer attachment, in band order (images first, then text pastes). */
 export type ComposerChipDescriptor =
 	| { kind: "image"; n: number; image: ImageContent; link: string | undefined }
-	| { kind: "paste"; n: number; text: TextAttachment };
+	| { kind: "paste"; n: number; text: TextAttachment }
+	| { kind: "file"; n: number; file: FileAttachment };
 
 /**
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
@@ -418,6 +434,10 @@ export class CustomEditor extends Editor {
 	 *  (labels key the atom table). */
 	pendingTexts: TextAttachment[] = [];
 	#textAttachmentCounter = 0;
+	/** File links staged as compact chip tokens; expansion (the `@`-mention) lives in the
+	 *  atom table under `label`. Numbered by a per-draft monotonic counter like pastes. */
+	pendingFiles: FileAttachment[] = [];
+	#fileAttachmentCounter = 0;
 	/** Host-wired producer of per-image `file://` links (session blob store); drives clickable
 	 *  chip tokens for restored drafts (esc-esc, `/tree`, branch). */
 	draftImageLinkMaterializer?: (images: readonly ImageContent[]) => Promise<(string | undefined)[] | undefined>;
@@ -473,6 +493,8 @@ export class CustomEditor extends Editor {
 		this.pendingImageLinks = [];
 		this.pendingTexts = [];
 		this.#textAttachmentCounter = 0;
+		this.pendingFiles = [];
+		this.#fileAttachmentCounter = 0;
 	}
 
 	/** Replace the composer draft with a restored historical prompt: re-attaches the message's
@@ -483,6 +505,8 @@ export class CustomEditor extends Editor {
 		this.clearAtoms();
 		this.pendingTexts = [];
 		this.#textAttachmentCounter = 0;
+		this.pendingFiles = [];
+		this.#fileAttachmentCounter = 0;
 		this.imageLinks = undefined;
 		this.pendingImages = images ? [...images] : [];
 		this.pendingImageLinks = images ? images.map(() => undefined) : [];
@@ -517,6 +541,22 @@ export class CustomEditor extends Editor {
 		this.insertAtom(label, expansion);
 	}
 
+	/** Stage `path` as a file chip: inserts the compact token at the cursor and registers
+	 *  `expansion` (the `@`-mention that embeds the file on submit) in the atom table. */
+	insertFileAttachment(path: string, expansion: string, size?: number): void {
+		this.#fileAttachmentCounter++;
+		const n = this.#fileAttachmentCounter;
+		const label = chipLabel("file", n);
+		this.pendingFiles.push({
+			n,
+			label,
+			path,
+			basename: basename(path),
+			size,
+		});
+		this.insertAtom(label, expansion);
+	}
+
 	/** Attachments whose chip token (or legacy bracketed marker) is still present in the buffer —
 	 *  deleting the inline token hides the chip and drops the attachment from the submission. */
 	composerChips(): ComposerChipDescriptor[] {
@@ -532,6 +572,10 @@ export class CustomEditor extends Editor {
 		for (const entry of this.pendingTexts) {
 			if (!text.includes(entry.label)) continue;
 			chips.push({ kind: "paste", n: entry.n, text: entry });
+		}
+		for (const entry of this.pendingFiles) {
+			if (!text.includes(entry.label)) continue;
+			chips.push({ kind: "file", n: entry.n, file: entry });
 		}
 		return chips;
 	}
@@ -1004,7 +1048,7 @@ export class CustomEditor extends Editor {
 		// bare key (plus ctrl/alt/shift). Probe the native modifier state so
 		// `super+<key>` bindings (Cmd+O model picker, Cmd+V paste) actually match.
 		if (canonical !== undefined && isNativeModifierPressed("command")) {
-		canonical = canonicalKeyId(`super+${canonical}`);
+			canonical = canonicalKeyId(`super+${canonical}`);
 		}
 
 		// Left-arrow on an empty editor: surface for the agent-hub double-tap

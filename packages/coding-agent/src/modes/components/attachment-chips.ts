@@ -11,11 +11,12 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { formatBytes } from "@oh-my-pi/pi-utils";
 import { convertImageToPng } from "../../utils/image-loading";
 import { attachmentSgr } from "../composer-attachments";
 import { cachedImageDimensions, setCachedImageDimensions } from "../image-references";
 import { theme } from "../theme/theme";
-import type { ComposerChipDescriptor, CustomEditor, TextAttachment } from "./custom-editor";
+import type { ComposerChipDescriptor, CustomEditor, FileAttachment, TextAttachment } from "./custom-editor";
 
 /** Chip card geometry (mirrors omp2): a 12x4 content area inside a 1-cell rounded border. */
 const INNER_COLS = 12;
@@ -66,13 +67,17 @@ export class AttachmentChipsBand implements Component {
 
 	#card(chip: ComposerChipDescriptor): string[] {
 		const sgr = attachmentSgr(chip.kind, chip.n);
-		const icon = theme.symbol(chip.kind === "image" ? "chip.image" : "chip.paste");
+		const iconKey = chip.kind === "image" ? "chip.image" : chip.kind === "file" ? "chip.file" : "chip.paste";
+		const icon = theme.symbol(iconKey);
 		let bottomCaption: string;
 		let interior: string[];
 		if (chip.kind === "image") {
 			const dims = this.#imageDims(chip.image);
 			bottomCaption = dims ? `${dims.width}x${dims.height}` : "";
 			interior = this.#imageInterior(chip.image, dims);
+		} else if (chip.kind === "file") {
+			bottomCaption = chip.file.size !== undefined ? formatBytes(chip.file.size) : "";
+			interior = this.#fileInterior(chip.file);
 		} else {
 			bottomCaption = chip.text.lineCount > 1 ? `+${chip.text.lineCount} lines` : `${chip.text.charCount} chars`;
 			interior = this.#textInterior(chip.text);
@@ -187,6 +192,24 @@ export class AttachmentChipsBand implements Component {
 			const pad = INNER_COLS - visibleWidth(cut);
 			rows.push(theme.fg("muted", cut) + " ".repeat(Math.max(0, pad)));
 		}
+		return rows;
+	}
+
+	/** 12x4 card interior for a linked file: basename on the first row, its directory below. */
+	#fileInterior(entry: FileAttachment): string[] {
+		const rows: string[] = [];
+		const name = truncateToWidth(replaceTabs(entry.basename), INNER_COLS);
+		const namePad = INNER_COLS - visibleWidth(name);
+		rows.push(theme.fg("muted", name) + " ".repeat(Math.max(0, namePad)));
+		const dir = entry.path.slice(0, Math.max(0, entry.path.length - entry.basename.length)).replace(/[\\/]+$/, "");
+		if (dir) {
+			const cut = truncateToWidth(replaceTabs(dir), INNER_COLS);
+			const pad = INNER_COLS - visibleWidth(cut);
+			rows.push(theme.fg("dim", cut) + " ".repeat(Math.max(0, pad)));
+		} else {
+			rows.push(" ".repeat(INNER_COLS));
+		}
+		rows.push(" ".repeat(INNER_COLS), " ".repeat(INNER_COLS));
 		return rows;
 	}
 }

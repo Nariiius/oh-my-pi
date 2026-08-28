@@ -235,6 +235,7 @@ export type SymbolKey =
 	// Composer attachment chips (image paste / large text paste)
 	| "chip.image"
 	| "chip.paste"
+	| "chip.file"
 	// Settings tab icons
 	| "tab.appearance"
 	| "tab.model"
@@ -579,6 +580,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	// Composer attachment chips
 	"chip.image": "🖼",
 	"chip.paste": "📄",
+	"chip.file": "📎",
 	// Settings tabs
 	"tab.appearance": "🎨",
 	"tab.model": "🤖",
@@ -998,6 +1000,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"chip.image": "\uf03e",
 	// pick:  (fa-file_text, matches omp2) | alt: 󰈙 (md-file_document)  (cod-file)
 	"chip.paste": "\uf15c",
+	"chip.file": "\uf0c6",
 	// Settings tab icons
 	"tab.appearance": "󰃣",
 	"tab.model": "󰚩",
@@ -1261,7 +1264,8 @@ const ASCII_SYMBOLS: SymbolMap = {
 	// Composer attachment chips
 	"chip.image": "img",
 	"chip.paste": "txt",
-	// Settings tab icons
+	"chip.file": "fil",
+	// Settings tabs
 	"tab.appearance": "[A]",
 	"tab.model": "[M]",
 	"tab.interaction": "[I]",

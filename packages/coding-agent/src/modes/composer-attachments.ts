@@ -2,9 +2,10 @@ import { SYMBOL_PRESETS } from "./theme/symbols";
 import { theme } from "./theme/theme";
 
 /** Attachment chip kinds staged in the composer: pasted images and large text pastes. */
-export type ChipKind = "image" | "paste";
+/** Attachment chip kinds staged in the composer: pasted images, large text pastes, and file links. */
+export type ChipKind = "image" | "paste" | "file";
 
-const CHIP_ICON_KEY = { image: "chip.image", paste: "chip.paste" } as const;
+const CHIP_ICON_KEY = { image: "chip.image", paste: "chip.paste", file: "chip.file" } as const;
 
 /** Compact atomic composer token for attachment `n` in the active symbol preset. */
 export function chipLabel(kind: ChipKind, n: number): string {
@@ -17,15 +18,20 @@ export function chipLabel(kind: ChipKind, n: number): string {
 const CHIP_ICONS: Record<ChipKind, readonly string[]> = {
 	image: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.image]))],
 	paste: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.paste]))],
+	file: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.file]))],
 };
 
-const CHIP_TOKEN_SOURCE = `(?:${[...CHIP_ICONS.image, ...CHIP_ICONS.paste]
+const CHIP_TOKEN_SOURCE = `(?:${[...CHIP_ICONS.image, ...CHIP_ICONS.paste, ...CHIP_ICONS.file]
 	.map(icon => (/^[a-z]+$/i.test(icon) ? `(?<![A-Za-z])${RegExp.escape(icon)}` : RegExp.escape(icon)))
 	.join("|")}) #[1-9]\\d*`;
 
 /** Infers an attachment kind from a chip label emitted by any configured symbol preset. */
 export function chipLabelKind(label: string): ChipKind {
-	return CHIP_ICONS.image.some(icon => label.startsWith(icon)) ? "image" : "paste";
+	return CHIP_ICONS.image.some(icon => label.startsWith(icon))
+		? "image"
+		: CHIP_ICONS.file.some(icon => label.startsWith(icon))
+			? "file"
+			: "paste";
 }
 
 const ATTACHMENT_PALETTE: readonly [number, number, number][] = [
@@ -39,7 +45,12 @@ const ATTACHMENT_PALETTE: readonly [number, number, number][] = [
 
 /** Stable RGB color assigned to attachment `n`; image and paste sequences use different offsets. */
 export function attachmentRgb(kind: ChipKind, n: number): readonly [number, number, number] {
-	const index = kind === "image" ? (n - 1) % ATTACHMENT_PALETTE.length : (n + 2) % ATTACHMENT_PALETTE.length;
+	const index =
+		kind === "image"
+			? (n - 1) % ATTACHMENT_PALETTE.length
+			: kind === "file"
+				? (n + 4) % ATTACHMENT_PALETTE.length
+				: (n + 2) % ATTACHMENT_PALETTE.length;
 	return ATTACHMENT_PALETTE[index];
 }
 
@@ -50,7 +61,7 @@ export function attachmentSgr(kind: ChipKind, n: number): string {
 }
 
 /** Matches expanded image and paste markers, including optional marker metadata. */
-export const PLACEHOLDER_REGEX = /\[(Image|Paste) #([1-9]\d*)(?:,[^\]\n]*)?\]/g;
+export const PLACEHOLDER_REGEX = /\[(Image|Paste|File) #([1-9]\d*)(?:,[^\]\n]*)?\]/g;
 /** Matches either an expanded attachment marker or a compact composer chip token. */
 export const COMPOSER_TOKEN_REGEX = new RegExp(`${PLACEHOLDER_REGEX.source}|${CHIP_TOKEN_SOURCE}`, "gu");
 
@@ -114,7 +125,7 @@ export function compactImageMarkers(text: string, imageCount: number): { text: s
 }
 
 /** Attachment kinds understood by placeholder renderers. */
-export type PlaceholderKind = "image" | "paste";
+export type PlaceholderKind = "image" | "paste" | "file";
 
 /** Rendering callbacks for plain text and parsed attachment references. */
 export interface PlaceholderRenderers {
@@ -138,7 +149,7 @@ export function renderPlaceholders(text: string, renderers: PlaceholderRenderers
 		if (match.index > last) result += renderers.renderText(text.slice(last, match.index));
 		const label = match[0];
 		if (label.startsWith("[")) {
-			const kind: PlaceholderKind = match[1] === "Paste" ? "paste" : "image";
+			const kind: PlaceholderKind = match[1] === "Paste" ? "paste" : match[1] === "File" ? "file" : "image";
 			result += renderers.renderReference(label, kind, Number(match[2]), "marker");
 		} else {
 			const index = Number(label.slice(label.lastIndexOf("#") + 1));

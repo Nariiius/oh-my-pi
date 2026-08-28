@@ -147,3 +147,42 @@ describe("AttachmentChipsBand — Kitty placeholder thumbnails", () => {
 		}
 	});
 });
+
+describe("AttachmentChipsBand — file cards", () => {
+	it("renders a file card with the chip token, basename, directory, and size caption", () => {
+		const { editor, band } = makeBand();
+		editor.insertFileAttachment("/tmp/proj/notes.ts", "@/tmp/proj/notes.ts", 2048);
+		const rows = band.render(80).map(Bun.stripANSI);
+		expect(rows).toHaveLength(6);
+		expect(rows[0]).toContain(chipLabel("file", 1));
+		expect(rows[1]).toContain("notes.ts");
+		expect(rows[2]).toContain("/tmp/proj");
+		expect(rows[5]).toContain("2.0KB");
+	});
+
+	it("expands the file chip to its @-mention on submit", () => {
+		const { editor } = makeBand();
+		editor.insertFileAttachment("/tmp/proj/notes.ts", "@/tmp/proj/notes.ts", 2048);
+		expect(editor.getExpandedText().trim()).toBe("@/tmp/proj/notes.ts");
+	});
+
+	it("hides the file card once its inline token is deleted from the buffer", () => {
+		const { editor, band } = makeBand();
+		editor.insertFileAttachment("/tmp/proj/notes.ts", "@/tmp/proj/notes.ts");
+		expect(band.render(80)).toHaveLength(6);
+		editor.setText("no token here");
+		expect(band.render(80)).toEqual([]);
+	});
+
+	it("shows image, paste, and file cards side by side", () => {
+		const { editor, band } = makeBand();
+		editor.pendingImages.push({ type: "image", data: TINY_PNG, mimeType: "image/png" });
+		editor.insertAtom(chipLabel("image", 1), "[Image #1, 2x2]");
+		editor.insertTextAttachment("hello");
+		editor.insertFileAttachment("/tmp/proj/notes.ts", "@/tmp/proj/notes.ts", 2048);
+		const rows = band.render(80).map(Bun.stripANSI);
+		expect(rows[0]).toContain(chipLabel("image", 1));
+		expect(rows[0]).toContain(chipLabel("paste", 1));
+		expect(rows[0]).toContain(chipLabel("file", 1));
+	});
+});

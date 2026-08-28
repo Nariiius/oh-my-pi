@@ -34,7 +34,6 @@ import { tinyTitleClient } from "../../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { vocalizer } from "../../tts/vocalizer";
-import { fileHyperlink } from "../../tui/hyperlink";
 import {
 	copyToClipboard,
 	readImageFromClipboard,
@@ -1776,10 +1775,33 @@ export class InputController {
 			}
 		}
 
-		// Non-image file: return styled [File: basename] reference.
-		const basename = path.basename(trimmed);
-		const label = `\x1b[1m\x1b[4m[File: ${basename}]\x1b[24m\x1b[22m`;
-		return `${fileHyperlink(trimmed, label)} `;
+		// Non-image file: insert an @-mention so the auto-read pipeline embeds the
+		// file content on submit — the same convention as the @-completion selector.
+		// The previous `[File: basename]` label dropped the path entirely: the
+		// editor's paste sanitizer strips its SGR/OSC 8 styling, and with no
+		// resolvable `@path` in the buffer the submit-time extractor never embeds.
+		const mention = /[\s"'@]/.test(trimmed)
+			? // Quoted form matches FILE_MENTION_REGEX; prefer double quotes, fall back
+				// to single quotes when the path itself contains a double quote. A path
+				// containing both quote characters has no embeddable quoting form — keep
+				// the raw text (hook contract: undefined = insert as typed).
+				!trimmed.includes('"')
+				? `@"${trimmed}"`
+				: !trimmed.includes("'")
+					? `@'${trimmed}'`
+					: undefined
+			: `@${trimmed}`;
+		if (mention === undefined) return undefined;
+		// Stage a file chip (matching the image/paste chip look) whose atom expands to the
+		// mention on submit; the chip card shows the basename, size, and directory.
+		let size: number | undefined;
+		try {
+			size = fsSync.statSync(trimmed).size;
+		} catch {
+			size = undefined;
+		}
+		this.ctx.editor.insertFileAttachment(trimmed, mention, size);
+		return "";
 	}
 
 	async handleImagePaste(): Promise<boolean> {
