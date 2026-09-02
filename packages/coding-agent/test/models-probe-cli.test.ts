@@ -12,7 +12,9 @@ import {
 	runModelProbes,
 	runModelsProbe,
 	runModelsProbeSlash,
+	startBackgroundStartupModelProbe,
 } from "@oh-my-pi/pi-coding-agent/cli/models-cli";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
@@ -355,5 +357,85 @@ describe("runModelsProbe", () => {
 			applied: boolean;
 		};
 		expect(parsed).toEqual({ probed: 0, working: [], failed: [], applied: false });
+	});
+
+	test("merges partial probe results with existing enabledModels without wiping unprobed models", async () => {
+		const settings = await Settings.loadIsolated({ cwd: tempDir, agentDir: tempDir });
+		// Existing enabled models: prov-b/existing, prov-a/old-working, prov-a/old-failing
+		settings.set("enabledModels", ["prov-a/old-failing", "prov-a/old-working", "prov-b/existing"]);
+		await settings.flush();
+
+		// We probe only prov-a: old-working passes, old-failing fails, new-working passes
+		const registry = fakeRegistry([
+			makeModel("prov-a", "old-working"),
+			makeModel("prov-a", "old-failing"),
+			makeModel("prov-a", "new-working"),
+		]);
+		const probeModel: ProbeModelFn = async model =>
+			resultFor(model, model.id !== "old-failing", model.id === "old-failing" ? "dead" : undefined);
+
+		const { chunks, restore } = captureStdout();
+		try {
+			await runModelsProbe({
+				modelRegistry: registry,
+				settings,
+				cwd: tempDir,
+				pattern: "prov-a",
+				json: true,
+				apply: true,
+				disableExtensionDiscovery: true,
+				probeModel,
+			});
+		} finally {
+			restore();
+		}
+
+		// prov-b/existing should be preserved; prov-a/old-failing should be removed; new-working and old-working should be present
+		expect(settings.get("enabledModels")).toEqual([
+			"prov-a/new-working",
+			"prov-a/old-working",
+			"prov-b/existing",
+		]);
+	});
+
+	test("startBackgroundStartupModelProbe automatically probes when stale or never probed", async () => {
+		const storage = await AgentStorage.open(":memory:");
+		try {
+			const settings = Settings.isolated({}, { storage });
+			const model = makeModel("prov-a", "m1");
+			const registry = fakeRegistry([model]);
+			const probed: string[] = [];
+			const probeModel: ProbeModelFn = async m => {
+				probed.push(m.id);
+				return resultFor(m, true);
+			};
+
+			// 1. Initial run: never probed before -> should probe
+			await startBackgroundStartupModelProbe({ modelRegistry: registry as unknown as ModelRegistry }, settings, {
+				probeModel,
+			});
+			expect(probed).toEqual(["m1"]);
+			expect(storage.getLastModelProbeTime()).toBeDefined();
+
+			// 2. Immediate second run: fresh (< 24h) -> should skip
+			probed.length = 0;
+			await startBackgroundStartupModelProbe({ modelRegistry: registry as unknown as ModelRegistry }, settings, {
+				probeModel,
+			});
+			expect(probed).toHaveLength(0);
+
+			// 3. Stale run: force stale timestamp (> 24h) -> should probe again
+			const staleTime = Date.now() - 25 * 60 * 60 * 1000;
+			storage.recordModelProbeResults([{ selector: "prov-a/m1", ok: true, latencyMs: 100, probedAt: staleTime }]);
+			expect(storage.getLastModelProbeTime()).toBeLessThanOrEqual(staleTime + 1000);
+
+			probed.length = 0;
+			await startBackgroundStartupModelProbe({ modelRegistry: registry as unknown as ModelRegistry }, settings, {
+				probeModel,
+			});
+			expect(probed).toEqual(["m1"]);
+		} finally {
+			AgentStorage.resetInstance();
+		}
 	});
 });

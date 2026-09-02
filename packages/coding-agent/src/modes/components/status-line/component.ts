@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { adjustHsv, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
+import { AUTO_THINKING } from "../../../thinking";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
@@ -2331,9 +2332,9 @@ export class StatusLineComponent implements Component {
 		const sm = this.session.sessionManager;
 
 		// ── Line 1: Path ────────────────────────────────────────────
-		const cwd = sm?.getCwd();
+		const cwd = typeof sm?.getCwd === "function" ? sm.getCwd() : undefined;
 		const branch = this.#getCurrentBranch();
-		const sessionName = sm?.getSessionName();
+		const sessionName = typeof sm?.getSessionName === "function" ? sm.getSessionName() : undefined;
 
 		let pwd = cwd ?? "";
 		if (pwd) {
@@ -2376,10 +2377,17 @@ export class StatusLineComponent implements Component {
 		const left = parts.join(" ");
 
 		// Model (right-aligned) — upstream model + thinking icons.
-		const mn = this.session.state.model?.name ?? this.session.state.model?.id ?? "Unknown";
+		const model = this.session.state.model;
+		const provider = model?.provider;
+		const rawName = model?.name ?? model?.id ?? "Unknown";
+		const mn = provider && !rawName.startsWith(`${provider}/`) ? `${provider}/${rawName}` : rawName;
 		const modelIcon = theme.icon.model ? `${theme.icon.model} ` : "";
-		const tl = this.session.state.thinkingLevel;
-		const thinkingGlyph = tl !== undefined ? (theme.thinking[tl as keyof typeof theme.thinking] ?? tl) : undefined;
+		const configured = this.session.configuredThinkingLevel?.() ?? this.session.state.thinkingLevel;
+		const tl = configured === AUTO_THINKING ? AUTO_THINKING : this.session.state.thinkingLevel;
+		const thinkingGlyph =
+			tl !== undefined && tl !== ThinkingLevel.Off
+				? (theme.thinking[tl as keyof typeof theme.thinking] ?? tl)
+				: undefined;
 		const modelText = `${modelIcon}${mn}`;
 		const mr = thinkingGlyph ? `${modelText} ${theme.sep.dot}${thinkingGlyph}` : modelText;
 		const lw = visibleWidth(left);

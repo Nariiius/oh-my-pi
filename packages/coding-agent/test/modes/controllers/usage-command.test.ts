@@ -160,4 +160,58 @@ describe("CommandController /usage", () => {
 		expect(output).toContain(`(${futureIso.slice(0, 10)})`);
 		expect(output).toContain(`expired (${expiredIso.slice(0, 10)})`);
 	});
+
+	it("opens interactive UsagePanelComponent overlay and closes cleanly without crashing", async () => {
+		let capturedPanel: { handleInput: (data: string) => void } | undefined;
+		const setFocus = vi.fn();
+		const requestRender = vi.fn();
+		const hideOverlay = vi.fn();
+		const editor = { name: "editor" };
+		const showOverlay = vi.fn().mockImplementation((panel: unknown) => {
+			capturedPanel = panel as { handleInput: (data: string) => void };
+			return { hide: hideOverlay };
+		});
+
+		const reports: UsageReport[] = [
+			{
+				provider: "openai-codex",
+				fetchedAt: Date.now(),
+				limits: [],
+			},
+		];
+
+		const ctx = {
+			session: {
+				fetchUsageReports: vi.fn().mockResolvedValue(reports),
+				getUsageReportingModelSelectors: () => [],
+				modelRegistry: {
+					getAvailable: () => [],
+					authStorage: { getOAuthAccountIdentity: () => undefined },
+				},
+			},
+			editor,
+			editorContainer: { children: [editor] },
+			ui: {
+				terminal: { columns: 100, rows: 40 },
+				showOverlay,
+				setFocus,
+				requestRender,
+			},
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext;
+
+		const controller = new CommandController(ctx);
+		await controller.handleUsageCommand();
+
+		expect(showOverlay).toHaveBeenCalledTimes(1);
+		expect(capturedPanel).toBeDefined();
+
+		// Simulate pressing q to close the overlay
+		capturedPanel.handleInput("q");
+
+		expect(hideOverlay).toHaveBeenCalledTimes(1);
+		expect(setFocus).toHaveBeenCalledWith(editor);
+		expect(requestRender).toHaveBeenCalled();
+	});
 });

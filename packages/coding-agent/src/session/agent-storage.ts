@@ -47,6 +47,7 @@ export interface ModelProbeInput {
 	ok: boolean;
 	latencyMs: number;
 	error?: string;
+	probedAt?: number;
 }
 
 type ModelPerfRow = {
@@ -163,6 +164,7 @@ export class AgentStorage {
 	#listModelPerfStmt: Statement;
 	#upsertModelProbeStmt: Statement;
 	#listModelProbeStmt: Statement;
+	#latestModelProbeTimeStmt: Statement;
 	#upsertCommandUsageStmt: Statement;
 	#listCommandUsageStmt: Statement;
 	#modelUsageCache: string[] | null = null;
@@ -220,15 +222,18 @@ ON CONFLICT(model_key) DO UPDATE SET
 		);
 		this.#upsertModelProbeStmt = this.#db.prepare(
 			`INSERT INTO model_probe_results (model_key, ok, latency_ms, error, probed_at)
-VALUES (?1, ?2, ?3, ?4, ${SQLITE_NOW_EPOCH})
+VALUES (?1, ?2, ?3, ?4, ?5)
 ON CONFLICT(model_key) DO UPDATE SET
 	ok = excluded.ok,
 	latency_ms = excluded.latency_ms,
 	error = excluded.error,
-	probed_at = ${SQLITE_NOW_EPOCH}`,
+	probed_at = excluded.probed_at`,
 		);
 		this.#listModelProbeStmt = this.#db.prepare(
 			"SELECT model_key, ok, latency_ms, error, probed_at FROM model_probe_results",
+		);
+		this.#latestModelProbeTimeStmt = this.#db.prepare(
+			"SELECT MAX(probed_at) as latest_probed_at FROM model_probe_results",
 		);
 		this.#upsertCommandUsageStmt = this.#db.prepare(
 			`INSERT INTO command_usage (name, count, last_used_at) VALUES (?, 1, ${SQLITE_NOW_EPOCH})
@@ -463,6 +468,7 @@ FROM model_usage_legacy
 		this.#listModelPerfStmt.finalize();
 		this.#upsertModelProbeStmt.finalize();
 		this.#listModelProbeStmt.finalize();
+		this.#latestModelProbeTimeStmt.finalize();
 		this.#upsertCommandUsageStmt.finalize();
 		this.#listCommandUsageStmt.finalize();
 		// SqliteAuthCredentialStore.close() finalizes its own statements and
@@ -624,9 +630,10 @@ FROM model_usage_legacy
 		if (results.length === 0) return;
 		try {
 			const stmt = this.#upsertModelProbeStmt;
+			const now = Date.now();
 			this.#db.transaction((batch: ReadonlyArray<ModelProbeInput>) => {
 				for (const result of batch) {
-					stmt.run(result.selector, result.ok ? 1 : 0, result.latencyMs, result.error ?? null);
+					stmt.run(result.selector, result.ok ? 1 : 0, result.latencyMs, result.error ?? null, result.probedAt ?? now);
 				}
 			})(results);
 		} catch (error) {
@@ -642,17 +649,35 @@ FROM model_usage_legacy
 		const records = new Map<string, ModelProbeRecord>();
 		try {
 			for (const row of this.#listModelProbeStmt.all() as ModelProbeRow[]) {
+				const probedAt = row.probed_at > 0 && row.probed_at < 1e11 ? row.probed_at * 1000 : row.probed_at;
 				records.set(row.model_key, {
 					ok: row.ok !== 0,
 					latencyMs: row.latency_ms,
 					...(row.error ? { error: row.error } : {}),
-					probedAt: row.probed_at,
+					probedAt,
 				});
 			}
 		} catch (error) {
 			logger.warn("AgentStorage failed to read model probe results", { error: String(error) });
 		}
 		return records;
+	}
+
+	/**
+	 * Epoch milliseconds of the most recent model probe result in the database,
+	 * or undefined if no models have ever been probed.
+	 */
+	getLastModelProbeTime(): number | undefined {
+		try {
+			const row = this.#latestModelProbeTimeStmt.get() as { latest_probed_at: number | null } | undefined;
+			if (!row || row.latest_probed_at === null || row.latest_probed_at === undefined || row.latest_probed_at <= 0) {
+				return undefined;
+			}
+			return row.latest_probed_at < 1e11 ? row.latest_probed_at * 1000 : row.latest_probed_at;
+		} catch (error) {
+			logger.warn("AgentStorage failed to read latest model probe time", { error: String(error) });
+			return undefined;
+		}
 	}
 
 	/**

@@ -2092,6 +2092,7 @@ export class InputController {
 		} else {
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
+			this.ctx.showStatus(`Thinking: ${newLevel}`);
 		}
 	}
 

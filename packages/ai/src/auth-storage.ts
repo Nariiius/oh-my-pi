@@ -56,6 +56,7 @@ import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/go
 import { kimiRankingStrategy, kimiUsageProvider } from "./usage/kimi";
 import { minimaxCodeUsageProvider } from "./usage/minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./usage/ollama";
+import { openrouterUsageProvider } from "./usage/openrouter";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
 import {
 	type CodexResetConsumeCode,
@@ -656,6 +657,7 @@ async function defaultConfigValueResolver(config: string): Promise<string | unde
 const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	alibabaTokenPlanUsageProvider,
 	openaiCodexUsageProvider,
+	openrouterUsageProvider,
 	kimiUsageProvider,
 	minimaxCodeUsageProvider,
 	antigravityUsageProvider,

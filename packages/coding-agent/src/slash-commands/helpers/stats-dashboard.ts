@@ -1,4 +1,3 @@
-import * as stats from "@oh-my-pi/omp-stats";
 import * as openUtils from "../../utils/open";
 
 export const DEFAULT_STATS_DASHBOARD_PORT = 3847;
@@ -69,6 +68,8 @@ export function parseStatsDashboardArgs(args: string): StatsDashboardArgs | { er
 }
 
 export async function launchStatsDashboard(args: StatsDashboardArgs): Promise<StatsDashboardLaunchResult> {
+	// Latency boundary: lazy-load stats dashboard server only when /stats is invoked
+	const stats = await import("@oh-my-pi/omp-stats");
 	const { processed, files } = await stats.syncAllSessions();
 	const total = await stats.getTotalMessageCount();
 	let requestedAddressIgnored = false;

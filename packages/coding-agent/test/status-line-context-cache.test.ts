@@ -14,6 +14,7 @@
  * redraw — that per-event recompute is what previously froze large sessions.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ContextUsage } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
@@ -572,5 +573,31 @@ describe("StatusLineComponent context breakdown", () => {
 		const chip = comp.getStandaloneTopBorder(80);
 		expect(chip.width).toBeGreaterThan(0);
 		expect(chip.content).toContain("test");
+	});
+
+	it("two-line footer renders provider prefix before model name and thinking level", () => {
+		const { session } = makeSession({
+			messages: [userMessage("hi")],
+			usage: { tokens: 26000, contextWindow: 1048576, percent: 2.6 },
+		});
+		session.state.model = {
+			id: "deepseek-v4-flash",
+			name: "deepseek-v4-flash",
+			provider: "agentrouter",
+			api: "openai-completions",
+			reasoning: true,
+		} as unknown as Model;
+		session.state.thinkingLevel = "high";
+
+		const comp = new StatusLineComponent(session);
+		comp.setTwoLineFooter(true);
+		comp.setComposerStyle({ bottomBar: "full", bottomBarGap: false });
+
+		const lines = comp.render(100);
+		expect(lines).toHaveLength(2);
+		const plainLine2 = stripVTControlCharacters(lines[1]!);
+		expect(plainLine2).toContain("2.6%/1049k (auto)");
+		expect(plainLine2).toContain("agentrouter/deepseek-v4-flash");
+		expect(plainLine2).toContain("high");
 	});
 });

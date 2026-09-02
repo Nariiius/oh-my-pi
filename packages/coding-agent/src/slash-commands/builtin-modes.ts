@@ -1,5 +1,4 @@
 import * as path from "node:path";
-import { formatProbeResultsText, parseModelsProbeArgs, runModelsProbeSlash } from "../cli/models-cli";
 import {
 	expandRoleAlias,
 	formatModelString,
@@ -367,6 +366,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			if (command.args) {
 				const [first, ...rest] = command.args.trim().split(/\s+/);
 				if (first === "probe") {
+					// Latency boundary: lazy-load models-cli only when invoking model probe
+					const { formatProbeResultsText, runModelsProbeSlash } = await import("../cli/models-cli");
 					const run = await runModelsProbeSlash({
 						modelRegistry: runtime.session.modelRegistry,
 						settings: runtime.settings,
@@ -416,6 +417,8 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.editor.setText("");
 			const [first, ...rest] = command.args.trim().split(/\s+/);
 			if (first === "probe") {
+				// Latency boundary: lazy-load models-cli only when invoking model probe
+				const { parseModelsProbeArgs } = await import("../cli/models-cli");
 				runtime.ctx.showModelsProbe(parseModelsProbeArgs(rest.join(" ")));
 				return;
 			}

@@ -817,7 +817,8 @@ export function getSupportedEfforts<TApi extends Api>(model: ApiModel<TApi>): re
 	if (!model.reasoning) {
 		return [];
 	}
-	return model.thinking?.efforts ?? [];
+	const efforts = model.thinking?.efforts ?? [];
+	return [...efforts].sort((a, b) => THINKING_EFFORTS.indexOf(a) - THINKING_EFFORTS.indexOf(b));
 }
 
 /**

@@ -849,7 +849,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
-		this.settings = session.settings;
+		this.settings = session.settings ?? settings;
 		const preferences = {
 			quiet: settings.get("startup.quiet"),
 			composerShape: settings.get("composer.shape") ?? DEFAULT_COMPOSER_SHAPE,
@@ -1003,7 +1003,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}));
 
 		// Convert custom commands (TypeScript) to SlashCommand format
-		const customCommands: SlashCommand[] = this.session.customCommands.map(loaded => ({
+		const customCommands: SlashCommand[] = (this.session.customCommands ?? []).map(loaded => ({
 			name: loaded.command.name,
 			description: `${loaded.command.description} (${loaded.source})`,
 			icon: getSlashCommandTypeIcon(loaded.path.startsWith("mcp:") ? "mcp" : "prompt"),
@@ -1031,6 +1031,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController = new SelectorController(this);
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
+		this.#syncStatusLineSettings();
+		this.syncComposerShape();
 		this.session.setTitleGenerationStart?.(() => {
 			this.#inputController.notifyTitleGenerationStart();
 		});
@@ -1147,7 +1149,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const recentSessions = await logger.time("InteractiveMode.init:recentSessions", async () => {
 			const preloaded = await options.recentSessions;
 			if (preloaded) return preloaded;
-			const sessions = await getRecentSessions(this.sessionManager.getSessionDir());
+			const sessionDir =
+				typeof this.sessionManager?.getSessionDir === "function"
+					? this.sessionManager.getSessionDir()
+					: undefined;
+			const sessions = sessionDir ? await getRecentSessions(sessionDir) : [];
 			return sessions.map(s => ({ name: s.name, timeAgo: s.timeAgo }));
 		});
 		const startupQuiet = settings.get("startup.quiet");
@@ -1161,7 +1167,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 		this.#persistComposerWelcome(modelName, providerName);
 		const headerBefore: Component[] = [];
-		for (const warning of this.session.configWarnings) {
+		for (const warning of this.session.configWarnings ?? []) {
 			headerBefore.push(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0), new Spacer(1));
 		}
 		const headerAfter: Component[] = [];
@@ -1217,7 +1223,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#eventBus) {
 			this.#observerRegistry.subscribeToEventBus(this.#eventBus);
 		}
-		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
+		this.#observerRegistry.setMainSession(this.sessionManager?.getSessionFile?.() ?? undefined);
 		this.syncRunningSubagentBadge();
 		this.#observerRegistry.onChange(kind => {
 			this.#scheduleObserverUiSync(kind);
@@ -1434,7 +1440,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.skillCommands.clear();
 		if (this.session.skillsSettings?.enableSkillCommands !== false) {
 			const icon = getSlashCommandTypeIcon("skill");
-			for (const skill of this.session.skills) {
+			for (const skill of this.session.skills ?? []) {
 				const commandName = `skill:${skill.name}`;
 				this.skillCommands.set(commandName, skill);
 				commands.push({ name: commandName, description: skill.description, icon });
@@ -1478,7 +1484,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			reservedNames.add(command.name);
 			for (const alias of command.aliases ?? []) reservedNames.add(alias);
 		}
-		const promptTemplateCommands: SlashCommand[] = this.session.promptTemplates
+		const promptTemplateCommands: SlashCommand[] = (this.session.promptTemplates ?? [])
 			.filter(template => !reservedNames.has(template.name))
 			.map(template => ({
 				name: template.name,
@@ -1492,7 +1498,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			basePath,
 		);
 		this.#applyAutocompleteProvider();
-		this.session.setSlashCommands(fileCommands);
+		this.session.setSlashCommands?.(fileCommands);
 	}
 
 	/**
@@ -2077,7 +2083,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
 		} else {
 			const accentEnabled = !isSettingsInitialized() || settings.get("statusLine.sessionAccent") !== false;
-			const sessionName = accentEnabled ? this.sessionManager.getSessionName() : undefined;
+			const sessionName =
+				accentEnabled && typeof this.sessionManager?.getSessionName === "function"
+					? this.sessionManager.getSessionName()
+					: undefined;
 			const hex = sessionName
 				? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
 				: undefined;
@@ -2654,7 +2663,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #loadTodoList(source: AgentSession = this.session): Promise<void> {
-		this.todoPhases = source.getTodoPhases();
+		this.todoPhases = typeof source.getTodoPhases === "function" ? source.getTodoPhases() : [];
 		this.#todoPhasesOwner = source;
 		this.#syncTodoAutoClearTimer();
 		this.#renderTodoList();
@@ -4935,8 +4944,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#persistComposerWelcome(modelName: string, providerName: string): void {
-		if (!this.sessionManager.getSessionFile()) return;
-		void writeComposerWelcomeCache(this.sessionManager.getCwd(), { modelName, providerName }).catch(error => {
+		if (typeof this.sessionManager?.getSessionFile !== "function" || !this.sessionManager.getSessionFile()) return;
+		const cwd = typeof this.sessionManager?.getCwd === "function" ? this.sessionManager.getCwd() : process.cwd();
+		void writeComposerWelcomeCache(cwd, { modelName, providerName }).catch(error => {
 			logger.debug("composer welcome cache write failed", { error });
 		});
 	}

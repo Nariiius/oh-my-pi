@@ -25,8 +25,7 @@ import { loadCapability } from "../../discovery";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
-// Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
-import * as PiCodingAgent from "../../index";
+import type * as PiIndexModule from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { EventBus } from "../../utils/event-bus";
@@ -52,6 +51,31 @@ import type {
 } from "./types";
 
 installLegacyPiSpecifierShim();
+
+let lazyPiModule: typeof PiIndexModule | undefined;
+function getPiCodingAgent(): typeof PiIndexModule {
+	if (!lazyPiModule) {
+		lazyPiModule = require("../../index");
+	}
+	return lazyPiModule;
+}
+
+const PiCodingAgent: typeof PiIndexModule = new Proxy({} as typeof PiIndexModule, {
+	get(_target, prop) {
+		const mod = getPiCodingAgent();
+		const val = (mod as unknown as Record<string | symbol, unknown>)[prop];
+		return typeof val === "function" ? val.bind(mod) : val;
+	},
+	has(_target, prop) {
+		return prop in getPiCodingAgent();
+	},
+	ownKeys(_target) {
+		return Reflect.ownKeys(getPiCodingAgent());
+	},
+	getOwnPropertyDescriptor(_target, prop) {
+		return Reflect.getOwnPropertyDescriptor(getPiCodingAgent(), prop);
+	},
+});
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };

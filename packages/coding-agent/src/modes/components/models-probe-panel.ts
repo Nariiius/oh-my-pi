@@ -11,8 +11,9 @@
  * toggles at close time).
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import type { Component, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, matchesKey, parseSgrMouse, type TUI } from "@oh-my-pi/pi-tui";
 import { type ModelProbeResult, type ProbeModelFn, runModelProbes } from "../../cli/models-cli";
+import { clampSelection, renderScrollableList } from "./selector-helpers";
 import { theme } from "../theme/theme";
 import { bottomBorder, row, topBorder } from "./overlay-box";
 
@@ -48,8 +49,13 @@ function formatLatency(latencyMs: number): string {
 	return `${(latencyMs / 1000).toFixed(1)}s`;
 }
 
-function resultStatus(result: ModelProbeResult | undefined, spinnerFrame: number): string {
-	if (!result) return theme.fg("muted", SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]);
+function resultStatus(result: ModelProbeResult | undefined, spinnerFrame: number, inFlight: boolean): string {
+	if (!result) {
+		if (inFlight) {
+			return theme.fg("accent", `${SPINNER_FRAMES[spinnerFrame % SPINNER_FRAMES.length]} probing…`);
+		}
+		return theme.fg("dim", "· queued");
+	}
 	if (result.ok) return theme.fg("success", `OK (${formatLatency(result.latencyMs)})`);
 	const status = result.errorStatus !== undefined ? `HTTP ${result.errorStatus}: ` : "";
 	return theme.fg("error", `FAIL (${formatLatency(result.latencyMs)}) — ${status}${result.error ?? "no response"}`);
@@ -70,6 +76,8 @@ export class ModelsProbePanelComponent implements Component {
 	#onClose: (selectors: string[] | null) => void | Promise<void>;
 
 	#results: Array<ModelProbeResult | undefined> = [];
+	/** 0-based model indices currently in flight in the probe pool. */
+	#inFlight = new Set<number>();
 	/** Selectors the user has enabled; working models start enabled. */
 	#enabled = new Set<string>();
 	#completed = 0;
@@ -104,8 +112,15 @@ export class ModelsProbePanelComponent implements Component {
 	async #run(): Promise<void> {
 		try {
 			await runModelProbes(this.#models, this.#probeModel, {
+				onStart: (index1Based, _total, _model) => {
+					if (this.#closed) return;
+					const modelIndex = index1Based - 1;
+					this.#inFlight.add(modelIndex);
+					this.#tui.requestRender();
+				},
 				onResult: (index, result) => {
 					if (this.#closed) return;
+					this.#inFlight.delete(index);
 					this.#results[index] = result;
 					this.#completed += 1;
 					if (result.ok) this.#enabled.add(result.selector);
@@ -117,12 +132,14 @@ export class ModelsProbePanelComponent implements Component {
 				},
 			});
 			if (this.#completed >= this.#models.length) {
+				this.#inFlight.clear();
 				this.#summary = this.#summaryText();
 				this.#stopSpinner();
 				this.#tui.requestRender();
 			}
 		} catch (error) {
 			if (this.#closed) return;
+			this.#inFlight.clear();
 			this.#summary = `Probe run failed: ${error instanceof Error ? error.message : String(error)}`;
 			this.#stopSpinner();
 			this.#tui.requestRender();
@@ -133,6 +150,18 @@ export class ModelsProbePanelComponent implements Component {
 		const working = this.#results.filter(result => result?.ok).length;
 		const failed = this.#results.filter(result => result && !result.ok).length;
 		return `Probe complete: ${this.#models.length}/${this.#models.length} — ${working} working, ${failed} failed`;
+	}
+
+	#statusText(): string {
+		if (this.#summary) return this.#summary;
+		const inFlightCount = this.#inFlight.size;
+		const queuedCount = Math.max(0, this.#models.length - this.#completed - inFlightCount);
+		const working = this.#results.filter(result => result?.ok).length;
+		const failed = this.#results.filter(result => result && !result.ok).length;
+		let details = `${this.#completed}/${this.#models.length} completed`;
+		if (inFlightCount > 0) details += ` (${inFlightCount} in flight, ${queuedCount} queued)`;
+		if (working > 0 || failed > 0) details += ` · ${working} working, ${failed} failed`;
+		return `Probing models… ${details}`;
 	}
 
 	#stopSpinner(): void {
@@ -189,7 +218,12 @@ export class ModelsProbePanelComponent implements Component {
 
 	#toggle(): void {
 		const row = this.#visibleRows()[this.#cursor];
-		if (!row || row === "failed-summary") return;
+		if (!row) return;
+		if (row === "failed-summary") {
+			this.#failedExpanded = !this.#failedExpanded;
+			this.#tui.requestRender();
+			return;
+		}
 		const result = this.#results[row.modelIndex];
 		// Pending and failed models are unselectable: only working models toggle.
 		if (!result?.ok) return;
@@ -203,34 +237,71 @@ export class ModelsProbePanelComponent implements Component {
 	}
 
 	handleInput(data: string): void {
-		// Fullscreen overlays enable mouse tracking; drop stray SGR reports.
-		if (data.startsWith("\x1b[<")) return;
-		switch (data) {
-			case "\x1b[A":
-			case "k":
-				this.#move(-1);
+		// Route SGR mouse wheel events for trackpad / mouse scrolling
+		if (data.startsWith("\x1b[<")) {
+			const event = parseSgrMouse(data);
+			if (event?.wheel === "up") {
+				this.#move(-3);
 				return;
-			case "\x1b[B":
-			case "j":
-				this.#move(1);
+			}
+			if (event?.wheel === "down") {
+				this.#move(3);
 				return;
-			case " ":
-				this.#toggle();
-				return;
-			case "f":
-				if (this.#failedCount() === 0) return;
-				this.#failedExpanded = !this.#failedExpanded;
-				this.#tui.requestRender();
-				return;
-			case "\r":
-			case "\n":
-				void this.#close(this.#selectors());
-				return;
-			case "\x1b":
-				void this.#close(this.#autoApply ? this.#selectors() : null);
-				return;
-			default:
-				return;
+			}
+			return;
+		}
+		if (matchesKey(data, "up") || matchesKey(data, "k") || data === "\x1b[A") {
+			this.#move(-1);
+			return;
+		}
+		if (matchesKey(data, "down") || matchesKey(data, "j") || data === "\x1b[B") {
+			this.#move(1);
+			return;
+		}
+		if (matchesKey(data, "pageUp") || data === "\x1b[5~") {
+			this.#move(-10);
+			return;
+		}
+		if (matchesKey(data, "pageDown") || data === "\x1b[6~") {
+			this.#move(10);
+			return;
+		}
+		if (matchesKey(data, "home")) {
+			this.#cursor = 0;
+			this.#scrollStart = 0;
+			this.#tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "end")) {
+			const rows = this.#visibleRows();
+			this.#cursor = Math.max(0, rows.length - 1);
+			this.#tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "space") || data === " ") {
+			this.#toggle();
+			return;
+		}
+		if (matchesKey(data, "f") || data === "f" || data === "F") {
+			if (this.#failedCount() === 0) return;
+			this.#failedExpanded = !this.#failedExpanded;
+			this.#tui.requestRender();
+			return;
+		}
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\r" || data === "\n") {
+			void this.#close(this.#selectors());
+			return;
+		}
+		if (
+			matchesKey(data, "escape") ||
+			matchesKey(data, "esc") ||
+			matchesKey(data, "q") ||
+			data === "q" ||
+			data === "Q" ||
+			data === "\x1b"
+		) {
+			void this.#close(this.#autoApply ? this.#selectors() : null);
+			return;
 		}
 	}
 
@@ -246,44 +317,60 @@ export class ModelsProbePanelComponent implements Component {
 		const listBudget = Math.max(MIN_VISIBLE, termRows - CHROME_ROWS);
 
 		const rows = this.#visibleRows();
-		if (rows.length > 0 && this.#cursor >= rows.length) {
-			this.#cursor = rows.length - 1;
-		}
-
-		// Keep the cursor row visible; the viewport follows it.
-		if (this.#cursor < this.#scrollStart) this.#scrollStart = this.#cursor;
-		if (this.#cursor >= this.#scrollStart + listBudget) {
-			this.#scrollStart = this.#cursor - listBudget + 1;
-		}
+		const { selectedIndex, scrollOffset } = clampSelection(
+			this.#cursor,
+			this.#scrollStart,
+			rows.length,
+			listBudget,
+		);
+		this.#cursor = selectedIndex;
+		this.#scrollStart = scrollOffset;
 
 		const out: string[] = [];
 		out.push(topBorder(width, "Probe Models"));
 
-		const pending = this.#models.length - this.#completed;
-		const status = this.#summary
-			? theme.fg("muted", ` ${this.#summary}`)
-			: theme.fg("muted", ` Probing ${this.#completed}/${this.#models.length} models… (${pending} pending)`);
+		const status = theme.fg("muted", ` ${this.#statusText()}`);
 		out.push(row(status, width));
 
+		const renderedRowStrings: string[] = [];
 		for (
-			let rowIndex = this.#scrollStart;
-			rowIndex < Math.min(rows.length, this.#scrollStart + listBudget);
+			let rowIndex = scrollOffset;
+			rowIndex < Math.min(rows.length, scrollOffset + listBudget);
 			rowIndex += 1
 		) {
 			const visibleRow = rows[rowIndex]!;
 			const cursorMark = rowIndex === this.#cursor ? theme.fg("accent", "›") : " ";
 			if (visibleRow === "failed-summary") {
 				const failedCount = this.#failedCount();
-				out.push(row(`${cursorMark} ${theme.fg("error", "✗")} Failed (${failedCount}) — press f to show`, width));
+				renderedRowStrings.push(`${cursorMark} ${theme.fg("error", "✗")} Failed (${failedCount}) — press f to show`);
 				continue;
 			}
 			const model = this.#models[visibleRow.modelIndex]!;
 			const result = this.#results[visibleRow.modelIndex];
+			const inFlight = this.#inFlight.has(visibleRow.modelIndex);
 			const selector = `${model.provider}/${model.id}`;
 			const enabled = this.#enabled.has(selector);
 			const mark =
-				result && !result.ok ? theme.fg("error", "✗") : enabled ? theme.fg("success", "✓") : theme.fg("dim", "·");
-			out.push(row(`${cursorMark} ${mark} ${selector}  ${resultStatus(result, this.#spinnerFrame)}`, width));
+				result && !result.ok
+					? theme.fg("error", "✗")
+					: inFlight
+						? theme.fg("accent", SPINNER_FRAMES[this.#spinnerFrame % SPINNER_FRAMES.length])
+						: enabled
+							? theme.fg("success", "✓")
+							: theme.fg("dim", "·");
+			renderedRowStrings.push(`${cursorMark} ${mark} ${selector}  ${resultStatus(result, this.#spinnerFrame, inFlight)}`);
+		}
+
+		const scrollableRows = renderScrollableList(renderedRowStrings, {
+			width: width - 2,
+			totalRows: rows.length,
+			scrollOffset,
+		});
+		for (const sRow of scrollableRows) {
+			out.push(row(sRow, width));
+		}
+		for (let i = scrollableRows.length; i < listBudget; i++) {
+			out.push(row("", width));
 		}
 
 		out.push(row(theme.fg("dim", this.#autoApply ? AUTO_APPLY_FOOTER_HINT : FOOTER_HINT), width));

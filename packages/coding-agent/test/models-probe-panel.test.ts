@@ -230,6 +230,85 @@ describe("ModelsProbePanelComponent", () => {
 		expect(results[1]?.ok).toBe(false);
 		expect(results[1]?.error).toBe("400 bad model");
 	});
+
+	test("shows queued and in-flight states before results arrive", async () => {
+		let finishSecond!: () => void;
+		const gate = new Promise<void>(resolve => {
+			finishSecond = resolve;
+		});
+		const { panel } = createHarness({
+			models: [makeModel("prov-a", "m1"), makeModel("prov-a", "m2")],
+			probeModel: async model => {
+				if (model.id === "m2") {
+					await gate;
+				}
+				return resultFor(model, true);
+			},
+		});
+
+		await flushMicrotasks();
+		// m1 has completed, m2 is in-flight (probing)
+		const text = normalize(panel.render(100));
+		expect(text).toContain("prov-a/m1");
+		expect(text).toContain("OK");
+		expect(text).toContain("prov-a/m2");
+		expect(text).toContain("probing…");
+
+		finishSecond();
+		await flushMicrotasks();
+		const textDone = normalize(panel.render(100));
+		expect(textDone).toContain("Probe complete: 2/2 — 2 working, 0 failed");
+	});
+
+	test("space on failed-summary expands and collapses failed models", async () => {
+		const { panel } = createHarness({
+			models: [makeModel("prov-a", "works"), makeModel("prov-a", "dead")],
+		});
+		await flushMicrotasks();
+
+		// Initially, failed models are collapsed in summary
+		let text = normalize(panel.render(100));
+		expect(text).toContain("Failed (1) — press f to show");
+		expect(text).not.toContain("FAIL");
+
+		// Move cursor to failed-summary and press space to toggle expansion
+		panel.handleInput("\x1b[B"); // Move to failed-summary row
+		panel.handleInput(" ");
+		await flushMicrotasks();
+
+		text = normalize(panel.render(100));
+		expect(text).toContain("FAIL");
+		expect(text).not.toContain("Failed (1) — press f to show");
+
+		// Press f to collapse
+		panel.handleInput("f");
+		await flushMicrotasks();
+		text = normalize(panel.render(100));
+		expect(text).toContain("Failed (1) — press f to show");
+	});
+
+	test("supports mouse wheel and page scrolling in probe panel", async () => {
+		const { panel } = createHarness({
+			models: [
+				makeModel("prov-a", "m1"),
+				makeModel("prov-a", "m2"),
+				makeModel("prov-a", "m3"),
+				makeModel("prov-a", "m4"),
+			],
+		});
+		await flushMicrotasks();
+
+		// Mouse wheel down
+		panel.handleInput("\x1b[<65;10;10M");
+		// Page down
+		panel.handleInput("\x1b[6~");
+		// Mouse wheel up
+		panel.handleInput("\x1b[<64;10;10M");
+
+		const text = normalize(panel.render(100));
+		expect(text).toContain("Probe Models");
+		expect(text).toContain("prov-a/m1");
+	});
 });
 
 describe("recordProbeResults", () => {
@@ -239,14 +318,40 @@ describe("recordProbeResults", () => {
 			const settings = Settings.isolated({}, { storage });
 			const models = [makeModel("prov-a", "works"), makeModel("prov-a", "dead")];
 
+			const before = Date.now();
 			recordProbeResults(settings, [resultFor(models[0]!, true), resultFor(models[1]!, false, "HTTP 402")]);
+			const after = Date.now();
 
 			const records = storage.getModelProbeResults();
 			expect(records.get("prov-a/works")?.ok).toBe(true);
 			const failed = records.get("prov-a/dead");
 			expect(failed?.ok).toBe(false);
 			expect(failed?.error).toBe("HTTP 402");
-			expect(failed?.probedAt).toBeGreaterThan(0);
+			expect(failed?.probedAt).toBeGreaterThanOrEqual(before);
+			expect(failed?.probedAt).toBeLessThanOrEqual(after);
+		} finally {
+			AgentStorage.resetInstance();
+		}
+	});
+
+	test("normalizes legacy second timestamps to milliseconds", async () => {
+		const storage = await AgentStorage.open(":memory:");
+		try {
+			// Insert a legacy record in seconds directly into SQLite
+			const legacySeconds = 1725000000;
+			storage.recordModelProbeResults([
+				{
+					selector: "prov-a/legacy",
+					ok: true,
+					latencyMs: 500,
+					probedAt: legacySeconds,
+				},
+			]);
+
+			const records = storage.getModelProbeResults();
+			const record = records.get("prov-a/legacy");
+			expect(record?.ok).toBe(true);
+			expect(record?.probedAt).toBe(legacySeconds * 1000);
 		} finally {
 			AgentStorage.resetInstance();
 		}

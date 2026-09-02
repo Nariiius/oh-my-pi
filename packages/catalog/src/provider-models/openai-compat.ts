@@ -6142,6 +6142,307 @@ export function anthropicModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 25. AgentRouter
+// ---------------------------------------------------------------------------
+
+export interface AgentRouterModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function agentrouterModelManagerOptions(
+	config?: AgentRouterModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createSimpleOpenAICompletionsOptions(
+		"agentrouter" as Parameters<typeof getBundledModels>[0],
+		"https://agentrouter.org/v1",
+		config,
+	);
+}
+
+export function agentrouterAnthropicModelManagerOptions(
+	config?: AgentRouterModelManagerConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	return createSimpleAnthropicProviderOptions(
+		"agentrouter-anthropic" as Parameters<typeof getBundledModels>[0],
+		"https://agentrouter.org",
+		config,
+	);
+}
+
+// ---------------------------------------------------------------------------
+// 26. JustDoWork / JustWorker
+// ---------------------------------------------------------------------------
+
+async function fetchCodingGatewayModels<TApi extends Api>(
+	providerId: Parameters<typeof getBundledModels>[0],
+	api: TApi,
+	baseUrl: string,
+	apiKey: string | undefined,
+	fetchImpl?: FetchImpl,
+): Promise<ModelSpec<TApi>[] | null> {
+	const references = createBundledReferenceMap<TApi>(providerId);
+	let origin: string;
+	try {
+		origin = new URL(baseUrl).origin;
+	} catch {
+		origin = baseUrl.replace(/\/+$/, "");
+	}
+	const headers: Record<string, string> = {
+		"User-Agent": "pi-code",
+		Accept: "application/json",
+	};
+	if (apiKey) {
+		headers.Authorization = `Bearer ${apiKey}`;
+	}
+
+	const discoveryFetchImpl = discoveryFetch(fetchImpl);
+
+	// 1. Try standard /v1/models
+	try {
+		const modelsUrl = `${origin}/v1/models`;
+		const res = await discoveryFetchImpl(modelsUrl, {
+			method: "GET",
+			headers,
+			signal: AbortSignal.timeout(5000),
+		});
+		if (res.ok) {
+			const data = (await res.json()) as { data?: Array<{ id?: string; model_name?: string }> };
+			const rawList = Array.isArray(data) ? data : data?.data;
+			if (Array.isArray(rawList) && rawList.length > 0) {
+				const specs: ModelSpec<TApi>[] = [];
+				for (const item of rawList) {
+					const id = item.id || item.model_name;
+					if (!id || typeof id !== "string") continue;
+					const reference = references.get(id);
+					const defaults: ModelSpec<TApi> = {
+						id,
+						name: id,
+						api,
+						provider: providerId,
+						baseUrl,
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: null,
+						maxTokens: null,
+					};
+					const mapped = mapWithBundledReference(item, defaults, reference);
+					if (mapped) specs.push(mapped);
+				}
+				if (specs.length > 0) return specs;
+			}
+		}
+	} catch {}
+
+	// 2. Fallback to /api/pricing (public on New API instances)
+	try {
+		const pricingUrl = `${origin}/api/pricing`;
+		const res = await discoveryFetchImpl(pricingUrl, {
+			method: "GET",
+			headers,
+			signal: AbortSignal.timeout(5000),
+		});
+		if (res.ok) {
+			const data = (await res.json()) as { data?: Array<{ model_name?: string; id?: string }> };
+			const rawList = Array.isArray(data) ? data : data?.data;
+			if (Array.isArray(rawList) && rawList.length > 0) {
+				const specs: ModelSpec<TApi>[] = [];
+				for (const item of rawList) {
+					const id = item.model_name || item.id;
+					if (!id || typeof id !== "string") continue;
+					const reference = references.get(id);
+					const defaults: ModelSpec<TApi> = {
+						id,
+						name: id,
+						api,
+						provider: providerId,
+						baseUrl,
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: null,
+						maxTokens: null,
+					};
+					const mapped = mapWithBundledReference(item, defaults, reference);
+					if (mapped) specs.push(mapped);
+				}
+				if (specs.length > 0) return specs;
+			}
+		}
+	} catch {}
+
+	return null;
+}
+
+export function createCodingGatewayModelManagerOptions(
+	providerId: Parameters<typeof getBundledModels>[0],
+	defaultBaseUrl: string,
+	config?: SimpleProviderConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? defaultBaseUrl;
+	return {
+		providerId,
+		cacheTtlMs: 30 * 60 * 1000,
+		fetchDynamicModels: () =>
+			fetchCodingGatewayModels("openai-completions", providerId, baseUrl, apiKey, config?.fetch),
+	};
+}
+
+export function createCodingGatewayAnthropicModelManagerOptions(
+	providerId: Parameters<typeof getBundledModels>[0],
+	defaultBaseUrlFallback: string,
+	config?: SimpleProviderConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeAnthropicBaseUrl(config?.baseUrl, defaultBaseUrlFallback);
+	return {
+		providerId,
+		cacheTtlMs: 30 * 60 * 1000,
+		fetchDynamicModels: () =>
+			fetchCodingGatewayModels("anthropic-messages", providerId, baseUrl, apiKey, config?.fetch),
+	};
+}
+
+export interface JustDoWorkModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function justdoworkModelManagerOptions(
+	config?: JustDoWorkModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createCodingGatewayModelManagerOptions(
+		"justdowork" as Parameters<typeof getBundledModels>[0],
+		"https://api.justwoker.icu/v1",
+		config,
+	);
+}
+
+export function justdoworkAnthropicModelManagerOptions(
+	config?: JustDoWorkModelManagerConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	return createCodingGatewayAnthropicModelManagerOptions(
+		"justdowork-anthropic" as Parameters<typeof getBundledModels>[0],
+		"https://api.justwoker.icu",
+		config,
+	);
+}
+
+export function justwokerModelManagerOptions(
+	config?: JustDoWorkModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createCodingGatewayModelManagerOptions(
+		"justwoker" as Parameters<typeof getBundledModels>[0],
+		"https://api.justwoker.icu/v1",
+		config,
+	);
+}
+
+export function justwokerAnthropicModelManagerOptions(
+	config?: JustDoWorkModelManagerConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	return createCodingGatewayAnthropicModelManagerOptions(
+		"justwoker-anthropic" as Parameters<typeof getBundledModels>[0],
+		"https://api.justwoker.icu",
+		config,
+	);
+}
+
+// ---------------------------------------------------------------------------
+// 27. TaBiAI / TabiToken
+// ---------------------------------------------------------------------------
+
+export interface TabiTokenModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function tabitokenModelManagerOptions(
+	config?: TabiTokenModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createCodingGatewayModelManagerOptions(
+		"tabitoken" as Parameters<typeof getBundledModels>[0],
+		"https://tabitoken.com/v1",
+		config,
+	);
+}
+
+export function tabitokenAnthropicModelManagerOptions(
+	config?: TabiTokenModelManagerConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	return createCodingGatewayAnthropicModelManagerOptions(
+		"tabitoken-anthropic" as Parameters<typeof getBundledModels>[0],
+		"https://tabitoken.com",
+		config,
+	);
+}
+
+// ---------------------------------------------------------------------------
+// 28. GoRouter
+// ---------------------------------------------------------------------------
+
+export interface GoRouterModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function gorouterModelManagerOptions(
+	config?: GoRouterModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createCodingGatewayModelManagerOptions(
+		"gorouter" as Parameters<typeof getBundledModels>[0],
+		"https://gorouter.app/v1",
+		config,
+	);
+}
+
+export function gorouterAnthropicModelManagerOptions(
+	config?: GoRouterModelManagerConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	return createCodingGatewayAnthropicModelManagerOptions(
+		"gorouter-anthropic" as Parameters<typeof getBundledModels>[0],
+		"https://gorouter.app",
+		config,
+	);
+}
+
+// ---------------------------------------------------------------------------
+// 29. KKtoken AI
+// ---------------------------------------------------------------------------
+
+export interface KKtokenModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function kktokenModelManagerOptions(
+	config?: KKtokenModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createCodingGatewayModelManagerOptions(
+		"kktoken" as Parameters<typeof getBundledModels>[0],
+		"https://kktoken.cc/v1",
+		config,
+	);
+}
+
+export function kktokenAnthropicModelManagerOptions(
+	config?: KKtokenModelManagerConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	return createCodingGatewayAnthropicModelManagerOptions(
+		"kktoken-anthropic" as Parameters<typeof getBundledModels>[0],
+		"https://kktoken.cc",
+		config,
+	);
+}
+
+// ---------------------------------------------------------------------------
 // Models.dev provider descriptors for generate-models.ts
 // ---------------------------------------------------------------------------
 

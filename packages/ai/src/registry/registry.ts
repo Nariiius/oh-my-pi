@@ -1,4 +1,14 @@
 import type { KnownProvider } from "@oh-my-pi/pi-catalog";
+import { agentrouterAnthropicProvider, agentrouterProvider } from "./agentrouter";
+import { gorouterAnthropicProvider, gorouterProvider } from "./gorouter";
+import {
+	justdoworkAnthropicProvider,
+	justdoworkProvider,
+	justwokerAnthropicProvider,
+	justwokerProvider,
+} from "./justdowork";
+import { kktokenAnthropicProvider, kktokenProvider } from "./kktoken";
+import { tabitokenAnthropicProvider, tabitokenProvider } from "./tabitoken";
 import { aiandProvider } from "./aiand";
 import { aimlApiProvider } from "./aimlapi";
 import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
@@ -86,6 +96,18 @@ import { zhipuCodingPlanProvider } from "./zhipu-coding-plan";
  * list for the loginable providers; non-login model providers are appended.
  */
 const ALL = [
+	agentrouterProvider,
+	agentrouterAnthropicProvider,
+	justdoworkProvider,
+	justdoworkAnthropicProvider,
+	justwokerProvider,
+	justwokerAnthropicProvider,
+	tabitokenProvider,
+	tabitokenAnthropicProvider,
+	gorouterProvider,
+	gorouterAnthropicProvider,
+	kktokenProvider,
+	kktokenAnthropicProvider,
 	azureProvider,
 	openaiCodexProvider,
 	anthropicProvider,

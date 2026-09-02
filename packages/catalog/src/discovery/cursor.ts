@@ -1,6 +1,6 @@
 import * as http2 from "node:http2";
 import { type } from "@oh-my-pi/omptype";
-import { isKimiK3ModelId } from "../identity";
+import { compareModelIdsWithThinkingEffort, isKimiK3ModelId } from "../identity";
 import { bareModelId, parseGlmModel, semverGte } from "../identity/classify";
 import { getBundledModels } from "../models";
 import { toModelSpec } from "../provider-models/bundled-references";
@@ -285,7 +285,7 @@ function normalizeCursorModels(
 		byId.set(normalized.id, normalized);
 	}
 
-	return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+	return [...byId.values()].sort((a, b) => compareModelIdsWithThinkingEffort(a.id, b.id));
 }
 
 function normalizeCursorModel(

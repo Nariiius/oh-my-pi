@@ -548,6 +548,11 @@ async function runInteractiveMode(
 			}),
 		);
 		void startBackgroundModelDiscovery?.();
+		void import("./cli/models-cli")
+			.then(({ startBackgroundStartupModelProbe }) => {
+				void startBackgroundStartupModelProbe(session, settings);
+			})
+			.catch(() => {});
 	} catch (error) {
 		mode.stop();
 		throw error;

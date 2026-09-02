@@ -321,6 +321,29 @@ export function resolveOpenAIRequestSetup(
 	if (model.provider === "xai" || model.provider === "xai-oauth") {
 		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
 	}
+	// AgentRouter and AI coding welfare gateways require User-Agent: pi-code for their WAF gates
+	if (
+		model.provider === "agentrouter" ||
+		model.provider === "agentrouter-anthropic" ||
+		baseUrl?.toLowerCase().includes("agentrouter.org") ||
+		baseUrl?.toLowerCase().includes("air-outer.com") ||
+		model.provider === "justdowork" ||
+		model.provider === "justdowork-anthropic" ||
+		model.provider === "justwoker" ||
+		model.provider === "justwoker-anthropic" ||
+		baseUrl?.toLowerCase().includes("justwoker.icu") ||
+		model.provider === "tabitoken" ||
+		model.provider === "tabitoken-anthropic" ||
+		baseUrl?.toLowerCase().includes("tabitoken.com") ||
+		model.provider === "gorouter" ||
+		model.provider === "gorouter-anthropic" ||
+		baseUrl?.toLowerCase().includes("gorouter.app") ||
+		model.provider === "kktoken" ||
+		model.provider === "kktoken-anthropic" ||
+		baseUrl?.toLowerCase().includes("kktoken.cc")
+	) {
+		setHeaderIfAbsent(headers, "User-Agent", "pi-code");
+	}
 	const requestHeaders = { ...headers };
 	// A keyless provider (`auth: none` in models.yml) resolves to the `N/A`
 	// sentinel rather than a real key. Injecting `Authorization: Bearer N/A`

@@ -16,16 +16,15 @@ import {
 import { reset as resetCapabilities } from "../../capability";
 import { showGitOverlay } from "../../cli/git-tui";
 import {
-	createModelProbe,
-	filterModelsByPattern,
 	type ModelProbeResult,
 	type ModelsProbeArgs,
-	recordProbeResults,
 } from "../../cli/models-cli";
 import {
 	formatModelSelectorValue,
+	getModelMatchPreferences,
 	resolveAdvisorRoleSelection,
 	resolveModelRoleValue,
+	resolveModelScope,
 } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
@@ -101,7 +100,6 @@ import { LoginDialogComponent } from "../components/login-dialog";
 import { LogoutAccountSelectorComponent } from "../components/logout-account-selector";
 import { ModelHubComponent, type ModelRoleSelectionScope } from "../components/model-hub";
 import { ModelPickerComponent } from "../components/model-picker";
-import { ModelsProbePanelComponent } from "../components/models-probe-panel";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
@@ -769,7 +767,10 @@ export class SelectorController {
 	 * the toggled selectors to `enabledModels` and closes, Esc closes (applying
 	 * the toggles when `--apply` was passed).
 	 */
-	showModelsProbe(options?: ModelsProbeArgs): void {
+	async showModelsProbe(options?: ModelsProbeArgs): Promise<void> {
+		// Latency boundary: lazy-import models-cli and probe panel to keep heavy discovery graph out of startup.
+		const [{ createModelProbe, filterModelsByPattern, recordProbeResults }, { ModelsProbePanelComponent }] =
+			await Promise.all([import("../../cli/models-cli"), import("../components/models-probe-panel")]);
 		const registry = this.ctx.session.modelRegistry;
 		const models = filterModelsByPattern(registry.getAvailable(), options?.pattern);
 		if (models.length === 0) {
@@ -790,15 +791,35 @@ export class SelectorController {
 				autoApply: options?.apply ?? false,
 			},
 			{
-				onClose: async selectors => {
-					if (selectors !== null && selectors.length > 0) {
-						this.ctx.settings.set("enabledModels", selectors);
-						await this.ctx.settings.flush();
-					}
-					recordProbeResults(
-						this.ctx.settings,
-						panel.getResults().filter((result): result is ModelProbeResult => result !== undefined),
+				onClose: async (selectors, testedResults) => {
+					const tested = (testedResults ?? panel.getResults()).filter(
+						(result): result is ModelProbeResult => result !== undefined,
 					);
+					if (selectors !== null && tested.length > 0) {
+						const currentEnabled = new Set(this.ctx.settings.get("enabledModels") ?? []);
+						for (const result of tested) {
+							if (selectors.includes(result.selector)) {
+								currentEnabled.add(result.selector);
+							} else {
+								currentEnabled.delete(result.selector);
+							}
+						}
+						const merged = Array.from(currentEnabled).sort((a, b) => a.localeCompare(b));
+						this.ctx.settings.set("enabledModels", merged);
+						await this.ctx.settings.flush();
+
+						// Immediately rebuild session scopedModels so the picker and cycle commands reflect the new models
+						const rebuiltScoped = await resolveModelScope(
+							merged,
+							this.ctx.session.modelRegistry,
+							getModelMatchPreferences(this.ctx.settings),
+							this.ctx.settings,
+						);
+						this.ctx.session.setScopedModels?.(
+							rebuiltScoped.map(s => ({ model: s.model, thinkingLevel: s.thinkingLevel })),
+						);
+					}
+					recordProbeResults(this.ctx.settings, tested);
 					abort.abort();
 					panel.dispose();
 					overlayHandle?.hide();
@@ -806,9 +827,7 @@ export class SelectorController {
 					this.ctx.ui.requestRender();
 					if (selectors !== null) {
 						this.ctx.showStatus(
-							selectors.length > 0
-								? `Applied ${selectors.length} model${selectors.length === 1 ? "" : "s"} to enabledModels`
-								: "No models enabled — enabledModels left unchanged",
+							`Updated enabledModels (${selectors.length} tested working model${selectors.length === 1 ? "" : "s"})`,
 						);
 					}
 				},

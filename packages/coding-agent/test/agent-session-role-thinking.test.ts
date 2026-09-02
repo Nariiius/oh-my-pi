@@ -351,6 +351,43 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.cycleThinkingLevel()).toBe("off");
 	});
 
+	it("always cycles thinking levels in strictly ascending order (minimal -> low -> medium -> high -> xhigh -> max)", async () => {
+		const outOfOrderModel = {
+			...getAnthropicModelOrThrow("claude-sonnet-4-5"),
+			thinking: {
+				efforts: [Effort.High, Effort.Minimal, Effort.XHigh, Effort.Low, Effort.Medium],
+			},
+		};
+		const agent = new Agent({
+			initialState: {
+				model: outOfOrderModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: "off",
+			},
+		});
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+
+		sessionSettings = Settings.isolated();
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: sessionSettings,
+			modelRegistry,
+		});
+		session.setThinkingLevel("off");
+
+		// Progression MUST strictly follow: off -> auto -> minimal -> low -> medium -> high -> xhigh -> off
+		expect(session.cycleThinkingLevel()).toBe(AUTO_THINKING);
+		expect(session.cycleThinkingLevel()).toBe(Effort.Minimal);
+		expect(session.cycleThinkingLevel()).toBe(Effort.Low);
+		expect(session.cycleThinkingLevel()).toBe(Effort.Medium);
+		expect(session.cycleThinkingLevel()).toBe(Effort.High);
+		expect(session.cycleThinkingLevel()).toBe(Effort.XHigh);
+		expect(session.cycleThinkingLevel()).toBe("off");
+	});
+
 	it("keeps auto configured while applying the classifier result as the effective level", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		await createSession({

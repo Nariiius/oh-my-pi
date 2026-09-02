@@ -142,4 +142,25 @@ describe("ModelBrowser probe marks", () => {
 		expect(out).toContain("probe FAIL");
 		expect(out).toContain("HTTP 402: quota");
 	});
+
+	test("sorts thinking effort variants in ascending order (low -> medium -> high -> xhigh -> max)", () => {
+		const models = [
+			makeModel("cursor", "claude-fable-5-high"),
+			makeModel("cursor", "claude-fable-5-low"),
+			makeModel("cursor", "claude-fable-5-max"),
+			makeModel("cursor", "claude-fable-5-medium"),
+			makeModel("cursor", "claude-fable-5-xhigh"),
+		];
+		const items = buildBrowserItems(models);
+		sortModelItems(items);
+
+		// Must be low -> medium -> high -> xhigh -> max
+		expect(items.map(item => item.id)).toEqual([
+			"claude-fable-5-low",
+			"claude-fable-5-medium",
+			"claude-fable-5-high",
+			"claude-fable-5-xhigh",
+			"claude-fable-5-max",
+		]);
+	});
 });

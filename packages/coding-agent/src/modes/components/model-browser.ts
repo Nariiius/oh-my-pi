@@ -11,6 +11,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { compareModelIdsWithThinkingEffort } from "@oh-my-pi/pi-catalog/identity";
 import {
 	type Component,
 	fuzzyRank,
@@ -215,7 +216,7 @@ export function sortModelItems(items: ModelBrowserItem[], options: SortModelItem
 		if (aHasRecency !== bHasRecency) return aHasRecency ? -1 : 1;
 
 		// If neither has recency info, fall back to alphabetical
-		if (!aHasRecency) return a.id.localeCompare(b.id);
+		if (!aHasRecency) return compareModelIdsWithThinkingEffort(a.id, b.id);
 
 		// -latest always sorts first within recency group
 		if (aIsLatest !== bIsLatest) return aIsLatest ? -1 : 1;
@@ -224,7 +225,7 @@ export function sortModelItems(items: ModelBrowserItem[], options: SortModelItem
 		if (aDate && bDate) return bDate.localeCompare(aDate);
 
 		// One has date, other is latest — latest first
-		return aIsLatest ? -1 : bIsLatest ? 1 : a.id.localeCompare(b.id);
+		return aIsLatest ? -1 : bIsLatest ? 1 : compareModelIdsWithThinkingEffort(a.id, b.id);
 	});
 }
 
@@ -908,7 +909,8 @@ export class ModelBrowser implements Component {
 }
 /** Compact relative age for probe marks: `now`, `4m`, `3h`, `2d`. */
 function formatProbeAge(probedAt: number, now: number = Date.now()): string {
-	const delta = Math.max(0, now - probedAt);
+	const normalizedProbedAt = probedAt > 0 && probedAt < 1e11 ? probedAt * 1000 : probedAt;
+	const delta = Math.max(0, now - normalizedProbedAt);
 	if (delta < 60_000) return "now";
 	if (delta < 3_600_000) return `${Math.floor(delta / 60_000)}m`;
 	if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)}h`;

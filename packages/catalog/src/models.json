@@ -55561,7 +55561,7 @@
 			"cost": {
 				"input": 0.14,
 				"output": 0.28,
-				"cacheRead": 0.0028,
+				"cacheRead": 0.014,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
@@ -55707,7 +55707,7 @@
 			"cost": {
 				"input": 0.14,
 				"output": 0.28,
-				"cacheRead": 0.0028,
+				"cacheRead": 0.014,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
@@ -55850,9 +55850,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.435,
-				"output": 0.87,
-				"cacheRead": 0.003625,
+				"input": 0.55,
+				"output": 2.19,
+				"cacheRead": 0.14,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
@@ -117971,8 +117971,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 0.06,
+				"output": 0.06,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -118042,8 +118042,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 0.06,
+				"output": 0.06,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -118112,8 +118112,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 0.024,
+				"output": 0.024,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -118183,8 +118183,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 0.024,
+				"output": 0.024,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -118253,8 +118253,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 0.012,
+				"output": 0.012,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -118324,8 +118324,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 0.012,
+				"output": 0.012,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -118394,8 +118394,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
+				"input": 0.06,
+				"output": 0.06,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -312259,6 +312259,165 @@
 				"reasoningContentField": "reasoning_content",
 				"supportsDeveloperRole": false
 			}
+		}
+	},
+	"agentrouter": {
+		"deepseek-v4-flash": {
+			"id": "deepseek-v4-flash",
+			"name": "DeepSeek V4 Flash",
+			"api": "openai-completions",
+			"provider": "agentrouter",
+			"baseUrl": "https://agentrouter.org/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.14,
+				"output": 0.28,
+				"cacheRead": 0.014,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 65536
+		},
+		"glm-5.3": {
+			"id": "glm-5.3",
+			"name": "GLM-5.3",
+			"api": "openai-completions",
+			"provider": "agentrouter",
+			"baseUrl": "https://agentrouter.org/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.4,
+				"output": 4.4,
+				"cacheRead": 0.26,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 65536
+		},
+		"glm-5.2": {
+			"id": "glm-5.2",
+			"name": "GLM-5.2",
+			"api": "openai-completions",
+			"provider": "agentrouter",
+			"baseUrl": "https://agentrouter.org/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.4,
+				"output": 4.4,
+				"cacheRead": 0.26,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 65536
+		},
+		"gpt-5.6-sol": {
+			"id": "gpt-5.6-sol",
+			"name": "GPT-5.6 Sol",
+			"api": "openai-completions",
+			"provider": "agentrouter",
+			"baseUrl": "https://agentrouter.org/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 5,
+				"output": 30,
+				"cacheRead": 0.5,
+				"cacheWrite": 6.25
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 65536
+		},
+		"gpt-5.5": {
+			"id": "gpt-5.5",
+			"name": "GPT-5.5",
+			"api": "openai-completions",
+			"provider": "agentrouter",
+			"baseUrl": "https://agentrouter.org/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 5,
+				"output": 30,
+				"cacheRead": 0.5,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 65536
+		}
+	},
+	"agentrouter-anthropic": {
+		"claude-opus-5": {
+			"id": "claude-opus-5",
+			"name": "Claude Opus 5",
+			"api": "anthropic-messages",
+			"provider": "agentrouter-anthropic",
+			"baseUrl": "https://agentrouter.org",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 5,
+				"output": 25,
+				"cacheRead": 0.5,
+				"cacheWrite": 6.25
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000
+		},
+		"claude-opus-4-8": {
+			"id": "claude-opus-4-8",
+			"name": "Claude Opus 4.8",
+			"api": "anthropic-messages",
+			"provider": "agentrouter-anthropic",
+			"baseUrl": "https://agentrouter.org",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 5,
+				"output": 25,
+				"cacheRead": 0.5,
+				"cacheWrite": 6.25
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000
+		},
+		"claude-opus-4-6": {
+			"id": "claude-opus-4-6",
+			"name": "Claude Opus 4.6",
+			"api": "anthropic-messages",
+			"provider": "agentrouter-anthropic",
+			"baseUrl": "https://agentrouter.org",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 5,
+				"output": 25,
+				"cacheRead": 0.5,
+				"cacheWrite": 6.25
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000
 		}
 	}
 }

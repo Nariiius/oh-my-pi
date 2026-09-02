@@ -79,3 +79,43 @@ export function getBracketStrippedModelIdCandidates(modelId: string): string[] {
 export function stripBracketedModelIdAffixes(modelId: string): string | undefined {
 	return getBracketStrippedModelIdCandidates(modelId)[0];
 }
+
+const THINKING_EFFORT_ORDER: Record<string, number> = {
+	minimal: 1,
+	low: 2,
+	medium: 3,
+	high: 4,
+	xhigh: 5,
+	max: 6,
+};
+
+const THINKING_SUFFIX_RE = /[-:](minimal|low|medium|high|xhigh|max)(?:[-:](fast|preview))?$/i;
+
+/**
+ * Compare model IDs, ensuring thinking level variants for the same base model
+ * always sort in strict effort progression:
+ * base -> minimal -> low -> medium -> high -> xhigh -> max
+ * instead of alphabetical order (which would erroneously sort high -> low -> max -> medium -> xhigh).
+ */
+export function compareModelIdsWithThinkingEffort(idA: string, idB: string): number {
+	if (idA === idB) return 0;
+	const matchA = idA.match(THINKING_SUFFIX_RE);
+	const matchB = idB.match(THINKING_SUFFIX_RE);
+
+	if (matchA || matchB) {
+		const baseA = matchA ? idA.slice(0, matchA.index) : idA;
+		const baseB = matchB ? idB.slice(0, matchB.index) : idB;
+		if (baseA === baseB) {
+			const effortA = matchA ? (THINKING_EFFORT_ORDER[matchA[1]!.toLowerCase()] ?? 0) : 0;
+			const effortB = matchB ? (THINKING_EFFORT_ORDER[matchB[1]!.toLowerCase()] ?? 0) : 0;
+			if (effortA !== effortB) {
+				return effortA - effortB;
+			}
+			const qualA = matchA?.[2] ?? "";
+			const qualB = matchB?.[2] ?? "";
+			if (qualA !== qualB) return qualA.localeCompare(qualB);
+		}
+	}
+
+	return idA.localeCompare(idB);
+}

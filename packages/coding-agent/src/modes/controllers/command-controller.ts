@@ -36,7 +36,7 @@ import { EvalExecutionComponent } from "../../modes/components/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "../../modes/components/move-overlay";
 import { TranscriptBlock } from "../../modes/components/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme";
-import type { InteractiveModeContext } from "../../modes/types";
+import type { InteractiveModeContext, OverlayHandle } from "../../modes/types";
 import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/context-usage";
 import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
@@ -522,8 +522,8 @@ export class CommandController {
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
 		let usageReports = reports ?? null;
+		const provider = this.ctx.session as { fetchUsageReports?: () => Promise<UsageReport[] | null> };
 		if (!usageReports) {
-			const provider = this.ctx.session as { fetchUsageReports?: () => Promise<UsageReport[] | null> };
 			if (!provider.fetchUsageReports) {
 				this.ctx.showWarning("Usage reporting is not configured for this session.");
 				return;
@@ -541,7 +541,6 @@ export class CommandController {
 			return;
 		}
 
-		const availableWidth = Math.max(40, (this.ctx.ui.terminal.columns ?? 100) - 2);
 		const currentProvider = this.ctx.session.model?.provider;
 		const activeAccount = currentProvider
 			? this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(
@@ -550,12 +549,91 @@ export class CommandController {
 				)
 			: undefined;
 		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(usageReports);
+
+		// Interactive overlay when launched in interactive TUI mode
+		if (typeof this.ctx.ui?.showOverlay === "function" && reports === undefined) {
+			// Latency boundary: lazy-import UsagePanelComponent to keep overlay graph out of cold startup.
+			const { UsagePanelComponent } = await import("../../modes/components/usage-panel");
+
+			const availableModels = this.ctx.session.modelRegistry?.getAvailable?.() ?? [];
+			const providersMap = new Map<
+				string,
+				{
+					models: Array<{
+						id: string;
+						name?: string;
+						contextWindow?: number | null;
+						cost?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+					}>;
+				}
+			>();
+			for (const m of availableModels) {
+				const prov = m.provider;
+				if (!providersMap.has(prov)) {
+					providersMap.set(prov, { models: [] });
+				}
+				providersMap.get(prov)!.models.push({
+					id: m.id,
+					name: m.name,
+					contextWindow: m.contextWindow,
+					cost: m.cost,
+				});
+			}
+
+			const sessionStats = this.ctx.session.sessionManager?.getUsageStatistics?.();
+			const apiKeyProviders = Array.from(providersMap.entries()).map(([prov, data]) => ({
+				provider: prov,
+				apiKeyConfigured: true,
+				active: prov === currentProvider,
+				models: data.models,
+				sessionUsage:
+					prov === currentProvider && sessionStats
+						? {
+								inputTokens: sessionStats.input,
+								outputTokens: sessionStats.output,
+								cost: sessionStats.cost,
+							}
+						: undefined,
+			}));
+
+			let overlayHandle: OverlayHandle | undefined;
+			const panel = new UsagePanelComponent(
+				this.ctx.ui,
+				{
+					reports: usageReports,
+					nowMs: Date.now(),
+					currentProvider,
+					activeAccount,
+					usageModelSelectors,
+					fetchUsageReports: provider.fetchUsageReports ? () => provider.fetchUsageReports!() : undefined,
+					apiKeyProviders,
+				},
+				{
+					onClose: () => {
+						panel.dispose();
+						overlayHandle?.hide();
+						const visible = this.ctx.editorContainer?.children?.[0] ?? this.ctx.editor;
+						if (visible) this.ctx.ui.setFocus(visible);
+						this.ctx.ui.requestRender();
+					},
+				},
+			);
+			overlayHandle = this.ctx.ui.showOverlay(panel, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				fullscreen: true,
+			});
+			return;
+		}
+
+		const availableWidth = Math.max(40, (this.ctx.ui?.terminal?.columns ?? 100) - 2);
 		const output = renderUsageReports(
 			usageReports,
 			theme,
 			Date.now(),
 			availableWidth,
-			provider => (provider === currentProvider ? activeAccount : undefined),
+			p => (p === currentProvider ? activeAccount : undefined),
 			usageModelSelectors,
 		);
 		this.ctx.presentCommandOutput([new Spacer(1), new Text(output, 1, 0)]);
