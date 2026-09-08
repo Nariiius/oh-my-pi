@@ -153,6 +153,21 @@ describe("ModelsProbePanelComponent", () => {
 		expect(onClose).toHaveBeenCalledWith(["prov-a/works"]);
 	});
 
+	test("Enter applies only the models remaining enabled after toggling", async () => {
+		const { panel, onClose } = createHarness({
+			models: [makeModel("prov-a", "m1"), makeModel("prov-a", "m2")],
+		});
+		await flushMicrotasks();
+
+		// Cursor starts on m1. Toggle m1 off.
+		panel.handleInput(" ");
+		panel.handleInput("\r");
+		await flushMicrotasks();
+
+		// Only m2 was left enabled
+		expect(onClose).toHaveBeenCalledWith(["prov-a/m2"]);
+	});
+
 	test("Esc closes without applying", async () => {
 		const { panel, onClose } = createHarness({
 			models: [makeModel("prov-a", "works")],
@@ -165,7 +180,7 @@ describe("ModelsProbePanelComponent", () => {
 		expect(onClose).toHaveBeenCalledWith(null);
 	});
 
-	test("Esc applies the toggles when autoApply is set", async () => {
+	test("Esc closes without modifying enabledModels even when autoApply is set", async () => {
 		const { panel, onClose } = createHarness({
 			models: [makeModel("prov-a", "works"), makeModel("prov-a", "dead")],
 			autoApply: true,
@@ -175,7 +190,7 @@ describe("ModelsProbePanelComponent", () => {
 		panel.handleInput("\x1b");
 		await flushMicrotasks();
 
-		expect(onClose).toHaveBeenCalledWith(["prov-a/works"]);
+		expect(onClose).toHaveBeenCalledWith(null);
 	});
 
 	test("dispose stops later results from applying or rendering", async () => {

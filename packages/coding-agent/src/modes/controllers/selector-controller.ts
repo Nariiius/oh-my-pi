@@ -812,8 +812,8 @@ export class SelectorController {
 	 * `/model probe` — fullscreen live probe view (same shell as `/settings`
 	 * and the Model Hub). Probes every (pattern-filtered) available model while
 	 * the overlay is open; space toggles a model's enabled state, Enter applies
-	 * the toggled selectors to `enabledModels` and closes, Esc closes (applying
-	 * the toggles when `--apply` was passed).
+	 * only the selected models to `enabledModels` and closes, Esc closes
+	 * (updating probe results and timestamps without modifying `enabledModels`).
 	 */
 	async showModelsProbe(options?: ModelsProbeArgs): Promise<void> {
 		// Latency boundary: lazy-import models-cli and probe panel to keep heavy discovery graph out of startup.
@@ -844,21 +844,25 @@ export class SelectorController {
 						(result): result is ModelProbeResult => result !== undefined,
 					);
 					if (selectors !== null && tested.length > 0) {
-						const currentEnabled = new Set(this.ctx.settings.get("enabledModels") ?? []);
-						for (const result of tested) {
-							if (selectors.includes(result.selector)) {
-								currentEnabled.add(result.selector);
-							} else {
+						let nextEnabled: string[];
+						if (options?.pattern) {
+							const currentEnabled = new Set(this.ctx.settings.get("enabledModels") ?? []);
+							for (const result of tested) {
 								currentEnabled.delete(result.selector);
 							}
+							for (const selector of selectors) {
+								currentEnabled.add(selector);
+							}
+							nextEnabled = Array.from(currentEnabled).sort((a, b) => a.localeCompare(b));
+						} else {
+							nextEnabled = Array.from(new Set(selectors)).sort((a, b) => a.localeCompare(b));
 						}
-						const merged = Array.from(currentEnabled).sort((a, b) => a.localeCompare(b));
-						this.ctx.settings.set("enabledModels", merged);
+						this.ctx.settings.set("enabledModels", nextEnabled);
 						await this.ctx.settings.flush();
 
 						// Immediately rebuild session scopedModels so the picker and cycle commands reflect the new models
 						const rebuiltScoped = await resolveModelScope(
-							merged,
+							nextEnabled,
 							this.ctx.session.modelRegistry,
 							getModelMatchPreferences(this.ctx.settings),
 							this.ctx.settings,
@@ -875,7 +879,11 @@ export class SelectorController {
 					this.ctx.ui.requestRender();
 					if (selectors !== null) {
 						this.ctx.showStatus(
-							`Updated enabledModels (${selectors.length} tested working model${selectors.length === 1 ? "" : "s"})`,
+							`Updated enabledModels (${selectors.length} model${selectors.length === 1 ? "" : "s"} enabled)`,
+						);
+					} else {
+						this.ctx.showStatus(
+							`Probe results recorded for ${tested.length} model${tested.length === 1 ? "" : "s"} (enabledModels unchanged)`,
 						);
 					}
 				},

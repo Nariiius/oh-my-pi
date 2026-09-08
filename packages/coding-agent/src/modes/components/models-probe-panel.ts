@@ -7,8 +7,8 @@
  * models collapse into a single `✗ Failed (N)` row at the bottom (`f` expands
  * them). Failed models are unselectable — space only toggles working models
  * (which start enabled). Enter applies the toggled selectors to
- * `enabledModels` and closes; Esc closes (and — with `--apply` — applies the
- * toggles at close time).
+ * `enabledModels` and closes; Esc closes without modifying `enabledModels`
+ * (recording probe results and updating the last-checked timestamp).
  */
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { type Component, matchesKey, parseSgrMouse, type TUI } from "@oh-my-pi/pi-tui";
@@ -22,15 +22,15 @@ export interface ModelsProbePanelOptions {
 	models: Model<Api>[];
 	/** Per-model probe; the host wires auth + timeout + abort. */
 	probeModel: ProbeModelFn;
-	/** Esc also applies the toggled set when true (`--apply`). */
-	autoApply: boolean;
+	/** Legacy flag; Esc now always closes without modifying enabledModels. */
+	autoApply?: boolean;
 }
 
 export interface ModelsProbePanelCallbacks {
 	/**
 	 * Fired once when the panel closes. `selectors` is the sorted toggled set
-	 * when the user applied (Enter, or Esc with `autoApply`), `null` when the
-	 * view was dismissed without applying.
+	 * when the user applied (Enter), `null` when the view was closed without
+	 * modifying enabledModels (Esc).
 	 */
 	onClose: (selectors: string[] | null) => void | Promise<void>;
 }
@@ -300,7 +300,7 @@ export class ModelsProbePanelComponent implements Component {
 			data === "Q" ||
 			data === "\x1b"
 		) {
-			void this.#close(this.#autoApply ? this.#selectors() : null);
+			void this.#close(null);
 			return;
 		}
 	}
@@ -373,7 +373,7 @@ export class ModelsProbePanelComponent implements Component {
 			out.push(row("", width));
 		}
 
-		out.push(row(theme.fg("dim", this.#autoApply ? AUTO_APPLY_FOOTER_HINT : FOOTER_HINT), width));
+		out.push(row(theme.fg("dim", FOOTER_HINT), width));
 		out.push(bottomBorder(width));
 		return out;
 	}
