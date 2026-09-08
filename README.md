@@ -1,9 +1,9 @@
 > [!IMPORTANT]
 > **This is not official omp.** It is [@Nariiius](https://github.com/Nariiius)'s personal fork of [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi). The installers below (`curl omp.sh`, Homebrew, npm, Nix) still install **upstream**. To run *this* tree, use [How to run this fork](#how-to-run-this-fork).
 
-# Personal fork (`local-custom-v18`)
+# Personal fork of Oh My Pi
 
-A local checkout of omp with a small UI/keybinding layer plus model-probe tooling on top. Everything else is upstream.
+A checkout of omp synced with upstream v18.1.14 with a UI/keybinding layer, model-probe tooling, coding gateway providers, and 210+ bundled skills on top.
 
 ## What is different
 
@@ -15,6 +15,8 @@ A local checkout of omp with a small UI/keybinding layer plus model-probe toolin
 | Model picker | Standard selector | Adds a **cycle-selection slot** so you can pick the model that `Ctrl+P` / `Ctrl+Shift+P` rotate through, separately from the session-only picker |
 | `omp models probe` / `/model probe` | Not present | New: sends a minimal one-word request through omp's own routing to every available model (all API families) and reports which ones actually respond. `--apply` writes the working `provider/model` selectors to `enabledModels`; `--json` / `--timeout` for scripted runs. Inside a session, `/model probe` opens a fullscreen live view — rows flip to OK/FAIL as probes land, failed models collapse under a `Failed (N)` row and stay unselectable, `space` toggles working models, `Enter` applies. Verdicts persist, and the model picker / Model Hub mark each model with its last result and age (`●2h` passed, `⦸5m` failed) |
 | Composer file attachments | Paste text only | New: **file attachment chips** — file icon, byte-size caption, and file interior rendering in the composer |
+| Gateway Providers | Upstream providers only | Built-in provider wiring and headers for **AgentRouter**, **JustDoWork**, **TabiToken**, **GoRouter**, and **KKtoken** (OpenAI & Anthropic-compatible) |
+| Bundled Skills | 3 skills | Over **210+ curated production skills** bundled in `.omp/skills/` (marketing, code review, Google Workspace, frontend design, architecture, document manipulation) |
 
 Also kept from this branch: file-paste in the composer actually applies; the image/PDF path matches upstream v18 (no extra vision-fallback setting).
 
@@ -23,7 +25,7 @@ Also kept from this branch: file-paste in the composer actually applies; the ima
 You need [Bun](https://bun.sh) ≥ 1.3.14 (and a Rust toolchain if natives are not already built).
 
 ```sh
-git clone -b local-custom-v18 https://github.com/Nariiius/oh-my-pi.git
+git clone https://github.com/Nariiius/oh-my-pi.git
 cd oh-my-pi
 bun setup
 bun dev
@@ -37,9 +39,14 @@ Smoke check:
 bun dev -- --version
 ```
 
-Checkout must be **`local-custom-v18`**. Cloning without `-b` lands on `main`, which is still upstream and does not include these changes.
+Both **`main`** and **`local-custom-v18`** branches are up to date and contain all fork enhancements.
 
 If you already have an `omp` from `omp.sh` / brew / npm, that binary is unrelated. Leave it installed; this source tree does not replace it until you run `bun dev` (or install from this clone yourself).
+
+## Installation & Setup Guide
+
+For full step-by-step configuration, credentials, and gateway setup:
+👉 **See [`GUIDE.md`](GUIDE.md) for the complete setup guide.**
 
 ---
 
