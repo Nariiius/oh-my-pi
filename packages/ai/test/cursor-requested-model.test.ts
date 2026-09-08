@@ -52,9 +52,43 @@ describe("Cursor requestedModel wire shape", () => {
 		]);
 	});
 
+	it("maps the extra-high sibling to the xhigh reasoning parameter", async () => {
+		const payload = await capture(cursorModel("gpt-5.6-sol-extra-high"));
+		expect(payload.requestedModel?.modelId).toBe("gpt-5.6-sol");
+		expect(payload.requestedModel?.parameters).toEqual([
+			expect.objectContaining({ id: "reasoning", value: "xhigh" }),
+		]);
+	});
+
+	it("normalizes an off-tier sibling to the base id with no parameters", async () => {
+		const payload = await capture(cursorModel("gpt-5.6-sol-none"));
+		expect(payload.requestedModel?.modelId).toBe("gpt-5.6-sol");
+		expect(payload.requestedModel?.parameters).toEqual([]);
+		expect(payload.modelDetails?.modelId).toBe("gpt-5.6-sol");
+	});
+
+	it("normalizes a fast-lane off-tier sibling preserving the lane", async () => {
+		const payload = await capture(cursorModel("gpt-5.6-sol-none-fast"));
+		expect(payload.requestedModel?.modelId).toBe("gpt-5.6-sol-fast");
+		expect(payload.requestedModel?.parameters).toEqual([]);
+		expect(payload.modelDetails?.modelId).toBe("gpt-5.6-sol-fast");
+	});
+
 	it("leaves Cursor-native ids untouched with no parameters", async () => {
 		const payload = await capture(cursorModel("cursor-composer-2.5"));
 		expect(payload.requestedModel?.modelId).toBe("cursor-composer-2.5");
+		expect(payload.requestedModel?.parameters).toEqual([]);
+	});
+
+	it("pins the Standard tier for bare composer-2.5 (#9012)", async () => {
+		const payload = await capture(cursorModel("composer-2.5"));
+		expect(payload.requestedModel?.modelId).toBe("composer-2.5");
+		expect(payload.requestedModel?.parameters).toEqual([expect.objectContaining({ id: "fast", value: "false" })]);
+	});
+
+	it("keeps explicit composer-2.5-fast on the Fast lane with no parameters", async () => {
+		const payload = await capture(cursorModel("composer-2.5-fast"));
+		expect(payload.requestedModel?.modelId).toBe("composer-2.5-fast");
 		expect(payload.requestedModel?.parameters).toEqual([]);
 	});
 

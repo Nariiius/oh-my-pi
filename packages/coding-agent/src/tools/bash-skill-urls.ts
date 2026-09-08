@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { resolveContainedPathSync } from "../discovery/contained-path";
+import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { validateRelativePath } from "../internal-urls/skill-protocol";
@@ -42,7 +43,12 @@ export interface InternalUrlExpansionOptions {
 	internalRouter?: InternalUrlResolver;
 	localOptions?: LocalProtocolOptions;
 	cwd?: string;
+	sessionFile?: string;
+	sessionId?: string;
+	agentRegistry?: ResolveContext["agentRegistry"];
 	ensureLocalParentDirs?: boolean;
+	/** Calling session's agent-scoped applicable rules — lets rule:// resolve without process-global state. */
+	rules?: readonly Rule[];
 }
 
 /**
@@ -258,6 +264,10 @@ async function resolveInternalUrlToPath(
 	localOptions?: LocalProtocolOptions,
 	ensureLocalParentDirs?: boolean,
 	cwd?: string,
+	sessionFile?: string,
+	sessionId?: string,
+	agentRegistry?: ResolveContext["agentRegistry"],
+	rules?: readonly Rule[],
 ): Promise<string> {
 	const url = normalizeLocalScheme(rawUrl);
 	const scheme = extractScheme(url);
@@ -299,7 +309,14 @@ async function resolveInternalUrlToPath(
 
 	let resource: InternalResource;
 	try {
-		resource = await internalRouter.resolve(url, { cwd, pathOnly: true });
+		resource = await internalRouter.resolve(url, {
+			cwd,
+			pathOnly: true,
+			sessionFile,
+			sessionId,
+			agentRegistry,
+			rules,
+		});
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		throw new ToolError(`Failed to resolve ${scheme}:// URL in bash command: ${url}\n${message}`);
@@ -361,6 +378,10 @@ export async function expandInternalUrls(command: string, options: InternalUrlEx
 				options.localOptions,
 				options.ensureLocalParentDirs,
 				options.cwd,
+				options.sessionFile,
+				options.sessionId,
+				options.agentRegistry,
+				options.rules,
 			);
 		} catch {
 			continue;

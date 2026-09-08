@@ -7,6 +7,16 @@
  * one implementation here prevents the classifiers from drifting between the
  * credential store and the model cache.
  */
+import type { Database } from "bun:sqlite";
+
+/** Checkpoints committed WAL frames without waiting for concurrent readers. */
+export function checkpointWal(db: Database): void {
+	try {
+		db.run("PRAGMA wal_checkpoint(PASSIVE)");
+	} catch {
+		// Non-WAL databases (such as :memory:) or closed databases cannot be checkpointed.
+	}
+}
 
 /**
  * SQLite's busy result-code family — base `SQLITE_BUSY` plus the extended

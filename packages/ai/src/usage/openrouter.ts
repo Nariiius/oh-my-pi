@@ -70,8 +70,9 @@ export async function fetchOpenRouterUsage(
 		});
 
 		const notes: string[] = [];
-		if (data.rate_limit?.requests && data.rate_limit?.interval) {
-			notes.push(`Rate limit: ${data.rate_limit.requests} req / ${data.rate_limit.interval}`);
+		const rateLimit = isRecord(data.rate_limit) ? data.rate_limit : undefined;
+		if (rateLimit?.requests && rateLimit?.interval) {
+			notes.push(`Rate limit: ${String(rateLimit.requests)} req / ${String(rateLimit.interval)}`);
 		}
 		if (data.is_free_tier) {
 			notes.push("Free tier");

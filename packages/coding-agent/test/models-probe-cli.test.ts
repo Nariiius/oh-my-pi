@@ -435,7 +435,7 @@ describe("runModelsProbe", () => {
 			});
 			expect(probed).toEqual(["m1"]);
 		} finally {
-			AgentStorage.resetInstance();
+			AgentStorage.close();
 		}
 	});
 });

@@ -330,7 +330,7 @@ describe("recordProbeResults", () => {
 			expect(failed?.probedAt).toBeGreaterThanOrEqual(before);
 			expect(failed?.probedAt).toBeLessThanOrEqual(after);
 		} finally {
-			AgentStorage.resetInstance();
+			AgentStorage.close();
 		}
 	});
 
@@ -353,7 +353,7 @@ describe("recordProbeResults", () => {
 			expect(record?.ok).toBe(true);
 			expect(record?.probedAt).toBe(legacySeconds * 1000);
 		} finally {
-			AgentStorage.resetInstance();
+			AgentStorage.close();
 		}
 	});
 });

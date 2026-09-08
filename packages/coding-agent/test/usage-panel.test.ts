@@ -47,7 +47,7 @@ const SAMPLE_REPORTS: UsageReport[] = [
 					id: "primary",
 					label: "5-hour window",
 					durationMs: 5 * 3600 * 1000,
-					resetsAt: new Date(Date.now() + 7200 * 1000).toISOString(),
+					resetsAt: Date.now() + 7200 * 1000,
 				},
 				amount: {
 					used: 40,
@@ -64,7 +64,7 @@ const SAMPLE_REPORTS: UsageReport[] = [
 					id: "secondary",
 					label: "Weekly window",
 					durationMs: 7 * 24 * 3600 * 1000,
-					resetsAt: new Date(Date.now() + 86400 * 1000).toISOString(),
+					resetsAt: Date.now() + 86400 * 1000,
 				},
 				amount: {
 					used: 85,
@@ -137,7 +137,7 @@ describe("renderUsageProgressBar", () => {
 				label: "Cursor Models",
 				scope: { provider: "cursor" },
 				window: { id: "monthly", label: "Monthly" },
-				amount: { usedFraction: 0.5 },
+				amount: { usedFraction: 0.5, unit: "percent" },
 			}),
 		).toBe("Cursor Models (Monthly)");
 
@@ -147,7 +147,7 @@ describe("renderUsageProgressBar", () => {
 				label: "Usage (Anthropic)",
 				scope: { provider: "google-antigravity" },
 				window: { id: "daily", label: "Daily" },
-				amount: { usedFraction: 0.2 },
+				amount: { usedFraction: 0.2, unit: "percent" },
 			}),
 		).toBe("Usage (Anthropic) (Daily)");
 	});

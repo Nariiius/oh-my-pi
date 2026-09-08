@@ -652,6 +652,10 @@ export class ModelControls {
 		} else {
 			const controller = new AbortController();
 			const timer = setTimeout(() => controller.abort(), ModelControls.#AUTO_THINKING_TIMEOUT_MS);
+			const usageOwner = {
+				sessionId: this.#host.sessionManager.getSessionId(),
+				parentId: this.#host.sessionManager.getLeafId(),
+			};
 			try {
 				resolved = await classifyDifficulty(promptText, {
 					settings: this.#host.settings,
@@ -660,6 +664,13 @@ export class ModelControls {
 					sessionId: this.#host.sessionId(),
 					signal: controller.signal,
 					metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+					onUsage: usage => {
+						const entryId = this.#host.sessionManager.appendModelUsage(
+							{ purpose: "auto-thinking", ...usage },
+							usageOwner,
+						);
+						if (entryId) usageOwner.parentId = entryId;
+					},
 				});
 			} catch (error) {
 				logger.debug("auto-thinking: classification failed; using fallback level", {

@@ -31,7 +31,7 @@ export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise
 	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 	// Latency boundary: lazy-load task discovery only when reloading plugins
 	const { refreshAgentDiscovery } = await import("../task");
-	await refreshAgentDiscovery(ctx.sessionManager.getCwd());
+	await refreshAgentDiscovery(ctx.sessionManager.getCwd(), ctx.session.effectiveExtensionRoots);
 	await ctx.refreshSkillState();
 	await ctx.refreshSlashCommandState();
 	resetCapabilities();

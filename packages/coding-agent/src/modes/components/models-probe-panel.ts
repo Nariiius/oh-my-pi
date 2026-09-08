@@ -240,11 +240,11 @@ export class ModelsProbePanelComponent implements Component {
 		// Route SGR mouse wheel events for trackpad / mouse scrolling
 		if (data.startsWith("\x1b[<")) {
 			const event = parseSgrMouse(data);
-			if (event?.wheel === "up") {
+			if (event?.wheel === -1) {
 				this.#move(-3);
 				return;
 			}
-			if (event?.wheel === "down") {
+			if (event?.wheel === 1) {
 				this.#move(3);
 				return;
 			}

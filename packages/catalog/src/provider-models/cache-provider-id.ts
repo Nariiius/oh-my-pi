@@ -9,6 +9,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-go": true,
 	"opencode-zen": true,
 	"github-copilot": true,
+	"muse-code": true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -18,6 +19,9 @@ export function isCredentialScopedModelCacheProvider(providerId: string): boolea
 
 export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | undefined {
 	switch (providerId) {
+		case "meta":
+		case "muse-code":
+			return "https://api.meta.ai/v1";
 		case "ollama":
 			return "http://127.0.0.1:11434";
 		case "litellm":
@@ -58,9 +62,17 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// carry `requestModelId: *-low`, which the Start plan refuses; refetch
 			// so the collapsed default is re-pointed to `-medium` (issue #9478).
 			return "cursor:default-effort-v4";
+		case "muse-code": {
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			return `muse-code:models-v1:${Bun.hash(scope).toString(36)}`;
+		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
-			return `litellm:rich-v6:${Bun.hash(baseUrl).toString(36)}`;
+			// rich-v8 invalidates rows whose `compatConfig` retained a colliding
+			// bundled model's provider-specific transport (e.g. Fireworks
+			// `wireModelIdMode`) before that leak was fixed (issue #9938).
+			return `litellm:rich-v8:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "opencode-go":
 		case "opencode-zen": {
@@ -80,9 +92,15 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// switching `COPILOT_GITHUB_TOKEN` to a different account misses the
 			// prior endpoint's cache and re-runs discovery instead of hitting the
 			// stale host and 403ing (PR #8510 review).
+			// v2: rows cached before the cross-provider routing strip inherit
+			// Cursor collapsed-family wire ids (e.g. enterprise-only
+			// `gpt-5.6-sol-fast` pinned to `-none-fast`); use a fresh namespace
+			// so they refetch instead of serving the poisoned rows. Listing ids
+			// cannot cover this class — any enterprise-only sibling can carry
+			// another provider's routing — so version the namespace instead.
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `github-copilot:models-v1:${Bun.hash(scope).toString(36)}`;
+			return `github-copilot:models-v2:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

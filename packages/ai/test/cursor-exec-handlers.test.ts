@@ -290,16 +290,16 @@ describe("Cursor resolveExecHandler execHandlers binding", () => {
 			expect(toolResult).toMatchObject({ toolCallId: "exec-1", isError: false });
 		});
 
-		it("records a rejected TResult-only return as a failed call", async () => {
-			// TResult-only is a supported handler form, so the transcript entry has
+		it("records a rejected R-only return as a failed call", async () => {
+			// R-only is a supported handler form, so the transcript entry has
 			// to be synthesized. A `rejected` result means Cursor was told the call
 			// failed - recording it as successful hides that from the user and from
 			// downstream lifecycle logic.
 			const rejected = create(ReadResultSchema, {
 				result: { case: "rejected", value: create(ReadRejectedSchema, { path: "/tmp/foo", reason: "denied" }) },
 			});
-			// Explicit TResult: `ReadResult` has its own `result` field, so inference
-			// would otherwise match the `{ result?: TResult }` handler-return variant
+			// Explicit R: `ReadResult` has its own `result` field, so inference
+			// would otherwise match the `{ result?: R }` handler-return variant
 			// and unwrap the oneof as the exec result.
 			const { execResult, toolResult } = await resolveExecHandler<{ path: string }, ReadResult>(
 				{ path: "/tmp/foo" },
@@ -320,7 +320,7 @@ describe("Cursor resolveExecHandler execHandlers binding", () => {
 			});
 		});
 
-		it("records an errored TResult-only return as a failed call", async () => {
+		it("records an errored R-only return as a failed call", async () => {
 			const errored = create(ReadResultSchema, {
 				result: { case: "error", value: create(ReadErrorSchema, { path: "/tmp/foo", error: "EIO" }) },
 			});
@@ -337,7 +337,7 @@ describe("Cursor resolveExecHandler execHandlers binding", () => {
 			expect(toolResult).toMatchObject({ content: [{ type: "text", text: "EIO" }], isError: true });
 		});
 
-		it("keeps a successful TResult-only return successful", async () => {
+		it("keeps a successful R-only return successful", async () => {
 			// `success` is the only non-failure variant; the placeholder text still
 			// applies because the handler gave the transcript nothing to show.
 			const ok = create(ReadResultSchema, {
@@ -604,6 +604,29 @@ describe("Cursor history encoding", () => {
 				content: [{ type: "tool-result", toolName: "read", toolCallId: "call-read", result: "" }],
 			},
 		]);
+	});
+
+	it("folds an orphaned tool result into assistant text for Cursor replay", () => {
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Wait for the background task.", timestamp: 1 },
+			{
+				role: "toolResult",
+				toolCallId: "call-orphan",
+				toolName: "hub",
+				content: [{ type: "text", text: "The background task was cancelled." }],
+				isError: false,
+				timestamp: 2,
+			},
+			{ role: "user", content: "Continue.", timestamp: 3 },
+		];
+
+		const history = buildCursorHistoryForTest(messages);
+		const repairedText = "[Tool Result]\nThe background task was cancelled.";
+		expect(history.rootPromptMessagesJson).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Wait for the background task." }] },
+			{ role: "assistant", content: [{ type: "text", text: repairedText }] },
+		]);
+		expect(history.turnStepMessagesJson).toEqual([[{ assistantMessage: { text: repairedText } }]]);
 	});
 
 	it("omits undefined optional tool arguments from protobuf replay", () => {
@@ -1002,6 +1025,65 @@ describe("Cursor history encoding", () => {
 				expect(step).not.toHaveProperty("thinkingMessage");
 			}
 		}
+	});
+
+	it("sanitizes foreign responses composite tool-call ids for Cursor replay", () => {
+		// openai-codex/responses history stores composite `"{callId}|{itemId}"`
+		// tool-call ids (encodeResponsesToolCallId). The `|` is invalid for
+		// Cursor's tool-call-id charset and gets the whole Run rejected as
+		// resource_exhausted, so it must be normalized identically on the call
+		// and result sides.
+		const compositeId = "call_abc123|fc_def456";
+		const sanitizedId = "call_abc123_fc_def456";
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Read package.json", timestamp: 1 },
+			{
+				...cursorAssistant(
+					"gpt-5.6-sol",
+					[{ type: "toolCall", id: compositeId, name: "read", arguments: { path: "package.json" } }],
+					2,
+					"toolUse",
+				),
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+			},
+			{
+				role: "toolResult",
+				toolCallId: compositeId,
+				toolName: "read",
+				content: [{ type: "text", text: "{}" }],
+				isError: false,
+				timestamp: 3,
+			},
+			{ role: "user", content: "Continue.", timestamp: 4 },
+		];
+
+		const history = buildCursorHistoryForTest(messages, undefined, "cursor-composer-2.5");
+		expect(history.rootPromptMessagesJson).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Read package.json" }] },
+			{
+				role: "assistant",
+				content: [{ type: "tool-call", toolCallId: sanitizedId, toolName: "read", args: { path: "package.json" } }],
+			},
+			{
+				role: "tool",
+				id: sanitizedId,
+				content: [{ type: "tool-result", toolName: "read", toolCallId: sanitizedId, result: "{}" }],
+			},
+		]);
+		expect(history.turnStepMessagesJson).toEqual([
+			[
+				expect.objectContaining({
+					toolCall: expect.objectContaining({
+						toolCallId: sanitizedId,
+						mcpToolCall: expect.objectContaining({
+							args: expect.objectContaining({ toolCallId: sanitizedId }),
+						}),
+					}),
+				}),
+			],
+		]);
+		expect(JSON.stringify(history)).not.toContain("|");
 	});
 
 	it("preserves image-only user turns in root prompt history and conversation turns", () => {

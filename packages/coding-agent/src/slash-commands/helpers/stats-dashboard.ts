@@ -19,6 +19,7 @@ export interface StatsDashboardLaunchResult {
 }
 
 let activeStatsServer: StatsDashboardServer | undefined;
+let lazyStats: typeof import("@oh-my-pi/omp-stats") | undefined;
 
 const STATS_DASHBOARD_USAGE = "Usage: /stats [--port <port>] [--host <host>]";
 
@@ -69,7 +70,7 @@ export function parseStatsDashboardArgs(args: string): StatsDashboardArgs | { er
 
 export async function launchStatsDashboard(args: StatsDashboardArgs): Promise<StatsDashboardLaunchResult> {
 	// Latency boundary: lazy-load stats dashboard server only when /stats is invoked
-	const stats = await import("@oh-my-pi/omp-stats");
+	const stats = (lazyStats ??= await import("@oh-my-pi/omp-stats"));
 	const { processed, files } = await stats.syncAllSessions();
 	const total = await stats.getTotalMessageCount();
 	let requestedAddressIgnored = false;
@@ -97,5 +98,5 @@ export function stopStatsDashboard(): void {
 	if (!activeStatsServer) return;
 	activeStatsServer.stop();
 	activeStatsServer = undefined;
-	stats.closeDb();
+	lazyStats?.closeDb();
 }

@@ -84,7 +84,7 @@ export function getDefaultModelSelectKeys(platform: NodeJS.Platform = process.pl
 
 /** Shortcuts for the session-only (non-persisted) model picker. */
 export function getDefaultModelSelectTemporaryKeys(platform: NodeJS.Platform = process.platform): KeyId[] {
-	return ["ctrl+n", ...(platform === "darwin" ? ["super+o"] : [])];
+	return platform === "darwin" ? ["ctrl+n", "super+o"] : ["ctrl+n"];
 }
 
 /**
@@ -156,7 +156,10 @@ export const KEYBINDINGS = {
 		description: "Send follow-up message",
 	},
 	"app.retry": {
-		defaultKeys: "alt+r",
+		// F5 leads: it is delivered verbatim by every terminal, unlike modified
+		// Enter chords (Ctrl/Alt/Cmd+Enter), which various terminals swallow or
+		// fold into plain Enter. The idle "F5 to Retry" status row advertises it.
+		defaultKeys: ["f5", "alt+r"],
 		description: "Retry last failed assistant turn",
 	},
 	"app.message.dequeue": {
