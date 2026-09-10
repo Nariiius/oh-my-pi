@@ -1,5 +1,6 @@
 import { classifyModel } from "./compat/taxonomy";
 import MODELS from "./models.json" with { type: "json" };
+import { getOpenRouterModelCost } from "./openrouter-pricing";
 import type { Api, KnownProvider, Model, ModelCost, TokenCost, Usage } from "./types";
 
 /**
@@ -79,7 +80,11 @@ export function calculateUsageCost(cost: ModelCost, usage: Usage): Usage["cost"]
 
 /** Price one usage record from its model's token rate card. */
 export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
-	return calculateUsageCost(model.cost, usage);
+	const cost =
+		model.cost && (model.cost.input > 0 || model.cost.output > 0)
+			? model.cost
+			: (getOpenRouterModelCost(model.id) ?? model.cost);
+	return calculateUsageCost(cost, usage);
 }
 
 /**

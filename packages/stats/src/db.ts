@@ -8,6 +8,7 @@ import {
 	getBundledModel,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
+import { getOpenRouterModelCost } from "@oh-my-pi/pi-catalog/openrouter-pricing";
 import { getConfigRootDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { classifyAgentType } from "./parser";
 import type {
@@ -360,6 +361,11 @@ function getCatalogCost(provider: string, modelId: string): ModelCost | null {
 		if (fallbackCost && hasBillableCost(fallbackCost)) {
 			return fallbackCost;
 		}
+	}
+
+	const openRouterCost = getOpenRouterModelCost(modelId);
+	if (openRouterCost && hasBillableCost(openRouterCost)) {
+		return openRouterCost;
 	}
 
 	return null;

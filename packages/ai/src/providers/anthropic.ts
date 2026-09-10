@@ -352,12 +352,21 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 		};
 		return allowAnthropicHeaderOverrides ? mergeHeaders(headers, anthropicHeaderOverrides) : headers;
 	} else if (!isOfficialAnthropicApiUrl(options.baseUrl)) {
+		const isGateway =
+			options.baseUrl?.toLowerCase().includes("agentrouter.org") ||
+			options.baseUrl?.toLowerCase().includes("air-outer.com") ||
+			options.baseUrl?.toLowerCase().includes("tokenforge.ai.studio") ||
+			options.baseUrl?.toLowerCase().includes("justwoker.icu") ||
+			options.baseUrl?.toLowerCase().includes("tabitoken.com") ||
+			options.baseUrl?.toLowerCase().includes("gorouter.app") ||
+			options.baseUrl?.toLowerCase().includes("kktoken.cc");
+		const effectiveUserAgent = incomingUserAgent ?? (isGateway ? "pi-code" : undefined);
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
 			Authorization: incomingAuthorization ?? `Bearer ${options.apiKey}`,
 			...sharedHeaders,
-			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
+			...(effectiveUserAgent ? { "User-Agent": effectiveUserAgent } : {}),
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
 			...(incomingApiKey ? { "X-Api-Key": incomingApiKey } : {}),
 		};
@@ -2207,6 +2216,22 @@ const streamAnthropicOnce = (
 				if (replacementPayload !== undefined) {
 					nextParams = replacementPayload as typeof nextParams;
 				}
+				const isAgentRouter =
+					model.provider?.toLowerCase().includes("agentrouter") ||
+					model.baseUrl?.toLowerCase().includes("agentrouter.org") ||
+					model.baseUrl?.toLowerCase().includes("air-outer.com");
+				if (isAgentRouter && Array.isArray(nextParams.system) && nextParams.system.length > 0) {
+					const first = nextParams.system[0];
+					if (
+						first &&
+						typeof first === "object" &&
+						"text" in first &&
+						typeof first.text === "string" &&
+						!first.text.includes("operating inside pi")
+					) {
+						first.text = `You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.\n\n${first.text}`;
+					}
+				}
 				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
 				rawRequestDump = {
 					provider: model.provider,
@@ -3921,6 +3946,23 @@ function buildParams(
 		firstUserMessageText,
 		cacheControl,
 	});
+
+	const isAgentRouter =
+		model.provider?.toLowerCase().includes("agentrouter") ||
+		model.baseUrl?.toLowerCase().includes("agentrouter.org") ||
+		model.baseUrl?.toLowerCase().includes("air-outer.com");
+	if (isAgentRouter) {
+		const CANONICAL_PI_HEADER =
+			"You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
+		if (!systemBlocks || systemBlocks.length === 0) {
+			systemBlocks = [{ type: "text", text: CANONICAL_PI_HEADER }];
+		} else {
+			const first = systemBlocks[0];
+			if (first && typeof first.text === "string" && !first.text.includes("operating inside pi")) {
+				first.text = `${CANONICAL_PI_HEADER}\n\n${first.text}`;
+			}
+		}
+	}
 
 	// Pre-compute tools.
 	let tools: AnthropicWireTool[] | undefined;

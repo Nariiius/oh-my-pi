@@ -94,7 +94,7 @@ export class ModelsProbePanelComponent implements Component {
 		this.#tui = tui;
 		this.#models = options.models;
 		this.#probeModel = options.probeModel;
-		this.#autoApply = options.autoApply;
+		this.#autoApply = options.autoApply ?? false;
 		this.#onClose = callbacks.onClose;
 		this.#results = new Array<ModelProbeResult | undefined>(options.models.length);
 
@@ -317,12 +317,7 @@ export class ModelsProbePanelComponent implements Component {
 		const listBudget = Math.max(MIN_VISIBLE, termRows - CHROME_ROWS);
 
 		const rows = this.#visibleRows();
-		const { selectedIndex, scrollOffset } = clampSelection(
-			this.#cursor,
-			this.#scrollStart,
-			rows.length,
-			listBudget,
-		);
+		const { selectedIndex, scrollOffset } = clampSelection(this.#cursor, this.#scrollStart, rows.length, listBudget);
 		this.#cursor = selectedIndex;
 		this.#scrollStart = scrollOffset;
 
@@ -333,16 +328,14 @@ export class ModelsProbePanelComponent implements Component {
 		out.push(row(status, width));
 
 		const renderedRowStrings: string[] = [];
-		for (
-			let rowIndex = scrollOffset;
-			rowIndex < Math.min(rows.length, scrollOffset + listBudget);
-			rowIndex += 1
-		) {
+		for (let rowIndex = scrollOffset; rowIndex < Math.min(rows.length, scrollOffset + listBudget); rowIndex += 1) {
 			const visibleRow = rows[rowIndex]!;
 			const cursorMark = rowIndex === this.#cursor ? theme.fg("accent", "›") : " ";
 			if (visibleRow === "failed-summary") {
 				const failedCount = this.#failedCount();
-				renderedRowStrings.push(`${cursorMark} ${theme.fg("error", "✗")} Failed (${failedCount}) — press f to show`);
+				renderedRowStrings.push(
+					`${cursorMark} ${theme.fg("error", "✗")} Failed (${failedCount}) — press f to show`,
+				);
 				continue;
 			}
 			const model = this.#models[visibleRow.modelIndex]!;
@@ -358,7 +351,9 @@ export class ModelsProbePanelComponent implements Component {
 						: enabled
 							? theme.fg("success", "✓")
 							: theme.fg("dim", "·");
-			renderedRowStrings.push(`${cursorMark} ${mark} ${selector}  ${resultStatus(result, this.#spinnerFrame, inFlight)}`);
+			renderedRowStrings.push(
+				`${cursorMark} ${mark} ${selector}  ${resultStatus(result, this.#spinnerFrame, inFlight)}`,
+			);
 		}
 
 		const scrollableRows = renderScrollableList(renderedRowStrings, {

@@ -11,6 +11,7 @@ import {
 } from "./justdowork";
 import { kktokenAnthropicProvider, kktokenProvider } from "./kktoken";
 import { tabitokenAnthropicProvider, tabitokenProvider } from "./tabitoken";
+import { tokenforgeAnthropicProvider, tokenforgeProvider } from "./tokenforge";
 import { amazonBedrockTransport } from "./amazon-bedrock";
 import { bedrockMantleTransport } from "./bedrock-mantle";
 import { buildProviderDefinition, type ProviderTransport } from "./build";
@@ -43,6 +44,8 @@ const CUSTOM_PROVIDERS: readonly ProviderDefinition[] = [
 	gorouterAnthropicProvider,
 	kktokenProvider,
 	kktokenAnthropicProvider,
+	tokenforgeProvider,
+	tokenforgeAnthropicProvider,
 ];
 
 /**
@@ -76,7 +79,9 @@ type CustomProviderId =
 	| "gorouter"
 	| "gorouter-anthropic"
 	| "kktoken"
-	| "kktoken-anthropic";
+	| "kktoken-anthropic"
+	| "tokenforge"
+	| "tokenforge-anthropic";
 
 /** Compile-time completeness: every catalog chat-model provider must have an auth policy. */
 type _MissingCatalogProviders = Exclude<KnownProvider, AuthProviderId | CustomProviderId>;

@@ -11,6 +11,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { getOpenRouterModelCost } from "@oh-my-pi/pi-catalog/openrouter-pricing";
 import { compareModelIdsWithThinkingEffort } from "@oh-my-pi/pi-catalog/identity";
 import {
 	type Component,
@@ -377,7 +378,10 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 
 /** `$in/out` per-million cost pair; `free` when both legs are zero. */
 function formatCostPair(model: Model): string {
-	const cost = model.cost;
+	const cost =
+		model.cost && (model.cost.input > 0 || model.cost.output > 0)
+			? model.cost
+			: (getOpenRouterModelCost(model.id) ?? model.cost);
 	if (!cost || (cost.input <= 0 && cost.output <= 0)) return "free";
 	const fmt = (n: number): string => {
 		if (n <= 0) return "0";

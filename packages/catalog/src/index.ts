@@ -9,6 +9,7 @@ export * from "./model-manager";
 export * from "./model-thinking";
 export * from "./model-tokenizer";
 export * from "./models";
+export * from "./openrouter-pricing";
 export * from "./provider-models";
 export * from "./types";
 export * from "./utils";

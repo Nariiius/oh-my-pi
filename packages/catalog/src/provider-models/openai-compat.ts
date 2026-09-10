@@ -6807,6 +6807,36 @@ export function kktokenAnthropicModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 30. TokenForge (tokenforge.ai.studio)
+// ---------------------------------------------------------------------------
+
+export interface TokenForgeModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function tokenforgeModelManagerOptions(
+	config?: TokenForgeModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createCodingGatewayModelManagerOptions(
+		"tokenforge" as Parameters<typeof getBundledModels>[0],
+		"https://tokenforge.ai.studio/v1",
+		config,
+	);
+}
+
+export function tokenforgeAnthropicModelManagerOptions(
+	config?: TokenForgeModelManagerConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	return createCodingGatewayAnthropicModelManagerOptions(
+		"tokenforge-anthropic" as Parameters<typeof getBundledModels>[0],
+		"https://tokenforge.ai.studio",
+		config,
+	);
+}
+
+// ---------------------------------------------------------------------------
 // Models.dev provider descriptors for generate-models.ts
 // ---------------------------------------------------------------------------
 

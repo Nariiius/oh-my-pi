@@ -48,7 +48,7 @@ Check: `omp --version`
 
 The fork adds `omp models probe` (checks which models actually respond), a session-only
 model picker (`Ctrl+N` / `Cmd+O`), composer file-attachment chips, 210+ bundled skills in `.omp/skills`,
-and native gateway providers (`agentrouter`, `justdowork`, `tabitoken`, `gorouter`, `kktoken`).
+and native gateway providers (`agentrouter`, `justdowork`, `tabitoken`, `gorouter`, `kktoken`, `tokenforge`).
 
 ```sh
 git clone https://github.com/Nariiius/oh-my-pi.git

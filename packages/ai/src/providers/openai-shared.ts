@@ -336,7 +336,10 @@ export function resolveOpenAIRequestSetup(
 		baseUrl?.toLowerCase().includes("gorouter.app") ||
 		model.provider === "kktoken" ||
 		model.provider === "kktoken-anthropic" ||
-		baseUrl?.toLowerCase().includes("kktoken.cc")
+		baseUrl?.toLowerCase().includes("kktoken.cc") ||
+		model.provider === "tokenforge" ||
+		model.provider === "tokenforge-anthropic" ||
+		baseUrl?.toLowerCase().includes("tokenforge.ai.studio")
 	) {
 		setHeaderIfAbsent(headers, "User-Agent", "pi-code");
 	}
