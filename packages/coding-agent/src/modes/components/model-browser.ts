@@ -11,7 +11,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { getOpenRouterModelCost } from "@oh-my-pi/pi-catalog/openrouter-pricing";
+import { getOpenRouterModelCost } from "@oh-my-pi/pi-catalog";
 import { compareModelIdsWithThinkingEffort } from "@oh-my-pi/pi-catalog/identity";
 import {
 	type Component,

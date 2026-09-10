@@ -4,11 +4,12 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import {
 	calculateUncachedInputCost,
 	calculateUsageCost,
+	estimateProxyCacheUsage,
 	type GeneratedProvider,
 	getBundledModel,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
-import { getOpenRouterModelCost } from "@oh-my-pi/pi-catalog/openrouter-pricing";
+import { getOpenRouterModelCost } from "@oh-my-pi/pi-catalog";
 import { getConfigRootDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { classifyAgentType } from "./parser";
 import type {
@@ -337,6 +338,7 @@ export async function initDb(): Promise<Database> {
 	backfillMissingCatalogCosts(db);
 	backfillNoCacheInputCosts(db);
 	backfillForkDuplicates(db);
+	backfillProxyCacheReadCosts(db);
 	return db;
 }
 
@@ -350,6 +352,10 @@ function getBundledModelCost(provider: string, modelId: string): ModelCost | nul
 }
 
 function getCatalogCost(provider: string, modelId: string): ModelCost | null {
+	if (provider === "xai-oauth" && modelId === "grok-composer-2.5-fast") {
+		return null;
+	}
+
 	const primaryCost = getBundledModelCost(provider, modelId);
 	if (primaryCost && hasBillableCost(primaryCost)) {
 		return primaryCost;
@@ -361,6 +367,10 @@ function getCatalogCost(provider: string, modelId: string): ModelCost | null {
 		if (fallbackCost && hasBillableCost(fallbackCost)) {
 			return fallbackCost;
 		}
+	}
+
+	if (provider === "xai-oauth") {
+		return null;
 	}
 
 	const openRouterCost = getOpenRouterModelCost(modelId);
@@ -485,6 +495,88 @@ function backfillNoCacheInputCosts(database: Database): void {
 		}
 	});
 	applyBackfill();
+}
+
+function backfillProxyCacheReadCosts(database: Database): void {
+	const candidateSessions = database
+		.prepare(`
+			SELECT DISTINCT session_file
+			FROM messages
+			WHERE cache_read_tokens = 0
+			  AND input_tokens >= 1024
+			  AND (
+				model LIKE '%claude%' OR model LIKE '%opus%' OR model LIKE '%sonnet%' OR model LIKE '%haiku%'
+				OR model LIKE '%gpt%' OR model LIKE '%o1%' OR model LIKE '%o3%' OR model LIKE '%o4%'
+				OR model LIKE '%deepseek%' OR model LIKE '%gemini%' OR model LIKE '%glm%'
+				OR model LIKE '%qwen%' OR model LIKE '%kimi%' OR model LIKE '%minimax%'
+				OR provider LIKE '%anthropic%' OR provider LIKE '%openai%' OR provider LIKE '%google%'
+			  )
+		`)
+		.all() as Array<{ session_file: string }>;
+
+	if (candidateSessions.length === 0) return;
+
+	const sessionMessagesStmt = database.prepare(`
+		SELECT id, provider, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
+		FROM messages
+		WHERE session_file = ?
+		ORDER BY id ASC
+	`);
+
+	const update = database.prepare(`
+		UPDATE messages
+		SET input_tokens = ?, cache_read_tokens = ?, cost_input = ?, cost_output = ?, cost_cache_read = ?, cost_cache_write = ?, cost_total = ?
+		WHERE id = ?
+	`);
+
+	const apply = database.transaction(() => {
+		for (const sess of candidateSessions) {
+			const rows = sessionMessagesStmt.all(sess.session_file) as Array<{
+				id: number;
+				provider: string;
+				model: string;
+				input_tokens: number;
+				output_tokens: number;
+				cache_read_tokens: number;
+				cache_write_tokens: number;
+			}>;
+
+			let prevPromptTokens = 0;
+			for (const row of rows) {
+				const reportedPrompt = row.input_tokens + row.cache_read_tokens;
+				const usage: Usage = {
+					input: row.input_tokens,
+					output: row.output_tokens,
+					cacheRead: row.cache_read_tokens,
+					cacheWrite: row.cache_write_tokens,
+					totalTokens: reportedPrompt + row.output_tokens,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				};
+
+				if (estimateProxyCacheUsage({ id: row.model, provider: row.provider }, usage, prevPromptTokens)) {
+					const cost = calculateCatalogCost(row.provider, row.model, usage);
+					if (cost) {
+						update.run(
+							usage.input,
+							usage.cacheRead,
+							cost.input,
+							cost.output,
+							cost.cacheRead,
+							cost.cacheWrite,
+							cost.total,
+							row.id,
+						);
+					}
+				}
+
+				if (reportedPrompt > 0) {
+					prevPromptTokens = reportedPrompt;
+				}
+			}
+		}
+	});
+
+	apply();
 }
 
 /**

@@ -72,7 +72,8 @@ export function calculateUsageCost(cost: ModelCost, usage: Usage): Usage["cost"]
 	const rates = resolveTokenCost(cost, promptInputTokens);
 	usage.cost.input = (rates.input / 1000000) * (usage.input + (orchestration?.input ?? 0));
 	usage.cost.output = (rates.output / 1000000) * (usage.output + (orchestration?.output ?? 0));
-	usage.cost.cacheRead = (rates.cacheRead / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0));
+	const cacheReadRate = rates.cacheRead > 0 ? rates.cacheRead : (rates.input > 0 ? rates.input * 0.5 : 0);
+	usage.cost.cacheRead = (cacheReadRate / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0));
 	usage.cost.cacheWrite = cacheWriteCost(rates, usage);
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	return usage.cost;
@@ -85,6 +86,66 @@ export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage
 			? model.cost
 			: (getOpenRouterModelCost(model.id) ?? model.cost);
 	return calculateUsageCost(cost, usage);
+}
+
+/**
+ * Heuristic Prompt Cache Estimation for Proxies:
+ * When an Anthropic / Claude model (or custom proxy) is used and the proxy
+ * reports zero cache read tokens (`cacheRead === 0`), consecutive turns in a
+ * conversation re-send the entire conversation history. In real Anthropic
+ * billing (and upstream caching proxies), the prior conversation prefix is
+ * served from the KV prompt cache at the 90%-discounted cacheRead rate ($0.50/M)
+ * rather than the full uncached input rate ($5.00/M).
+ *
+ * This function estimates the cached prefix overlap between consecutive turns,
+ * adjusting `usage.cacheRead` and `usage.input` before computing costs.
+ */
+export function estimateProxyCacheUsage(
+	model: { id: string; provider?: string },
+	usage: Usage,
+	prevPromptTokens: number,
+): boolean {
+	if (usage.cacheRead > 0 || usage.cacheWrite > 0) return false;
+
+	const reportedPrompt = usage.input;
+	if (reportedPrompt < 1024 || prevPromptTokens < 1024) return false;
+
+	const id = model.id.toLowerCase();
+	const provider = model.provider ? model.provider.toLowerCase() : "";
+
+	const isCachingCapable =
+		id.includes("claude") ||
+		id.includes("opus") ||
+		id.includes("sonnet") ||
+		id.includes("haiku") ||
+		id.includes("gpt-") ||
+		id.includes("o1") ||
+		id.includes("o3") ||
+		id.includes("o4") ||
+		id.includes("deepseek") ||
+		id.includes("gemini") ||
+		id.includes("glm") ||
+		id.includes("qwen") ||
+		id.includes("kimi") ||
+		id.includes("minimax") ||
+		id.includes("codex") ||
+		provider.includes("anthropic") ||
+		provider.includes("openai") ||
+		provider.includes("google") ||
+		provider.includes("deepseek");
+
+	if (!isCachingCapable) return false;
+
+	let estimatedCacheRead: number;
+	if (reportedPrompt >= prevPromptTokens) {
+		estimatedCacheRead = prevPromptTokens;
+	} else {
+		estimatedCacheRead = Math.floor(reportedPrompt * 0.9);
+	}
+
+	usage.cacheRead = estimatedCacheRead;
+	usage.input = Math.max(0, reportedPrompt - estimatedCacheRead);
+	return true;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { calculateCost } from "../src/models";
+import { calculateCost, estimateProxyCacheUsage } from "../src/models";
 import { getOpenRouterModelCost } from "../src/openrouter-pricing";
 import type { Model, Usage } from "../src/types";
 
@@ -76,5 +76,81 @@ describe("OpenRouter live pricing resolution", () => {
 		expect(computed.cacheRead).toBeCloseTo(0.025, 5);
 		expect(computed.cacheWrite).toBeCloseTo(0.03125, 5);
 		expect(computed.total).toBeCloseTo(0.15625, 5);
+	});
+
+	describe("estimateProxyCacheUsage", () => {
+		it("estimates cacheRead from previous turn prompt tokens on Claude models", () => {
+			const model = { id: "claude-opus-5", provider: "gorouter" };
+			const usage: Usage = {
+				input: 55_000,
+				output: 500,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 55_500,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+
+			const triggered = estimateProxyCacheUsage(model, usage, 50_000);
+			expect(triggered).toBe(true);
+			expect(usage.cacheRead).toBe(50_000);
+			expect(usage.input).toBe(5_000);
+			expect(usage.input + usage.cacheRead).toBe(55_000);
+		});
+
+		it("accurately handles 800k+ long context turns without inflating cost", () => {
+			const model = { id: "claude-opus-5", provider: "gorouter" } as unknown as Model<"openai-completions">;
+			const usage: Usage = {
+				input: 864_545,
+				output: 200,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 864_745,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+
+			const triggered = estimateProxyCacheUsage(model, usage, 860_000);
+			expect(triggered).toBe(true);
+			expect(usage.cacheRead).toBe(860_000);
+			expect(usage.input).toBe(4_545);
+
+			const cost = calculateCost(model, usage);
+			// input: 4,545 * $5/M = $0.022725
+			// cacheRead: 860,000 * $0.50/M = $0.43
+			// output: 200 * $25/M = $0.005
+			// total = ~0.457725 instead of ~$4.32!
+			expect(cost.total).toBeCloseTo(0.457725, 4);
+		});
+
+		it("skips estimation on the first turn or below the 1024-token threshold", () => {
+			const model = { id: "claude-opus-5", provider: "gorouter" };
+			const usage: Usage = {
+				input: 500,
+				output: 50,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 550,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+
+			expect(estimateProxyCacheUsage(model, usage, 0)).toBe(false);
+			expect(usage.cacheRead).toBe(0);
+			expect(usage.input).toBe(500);
+		});
+
+		it("does not override if provider already reported non-zero cacheRead", () => {
+			const model = { id: "claude-opus-5", provider: "gorouter" };
+			const usage: Usage = {
+				input: 5_000,
+				output: 200,
+				cacheRead: 50_000,
+				cacheWrite: 0,
+				totalTokens: 55_200,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+
+			expect(estimateProxyCacheUsage(model, usage, 45_000)).toBe(false);
+			expect(usage.cacheRead).toBe(50_000);
+			expect(usage.input).toBe(5_000);
+		});
 	});
 });

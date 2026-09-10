@@ -79,7 +79,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { calculateCost, estimateProxyCacheUsage, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 import {
 	$env,
@@ -2431,6 +2431,7 @@ export class AgentSession {
 
 	// Track last assistant message for auto-compaction check
 	#lastAssistantMessage: AssistantMessage | undefined = undefined;
+	#lastAssistantPromptTokens = 0;
 	/**
 	 * Classifier-refusal turn pruned from active context at settle (#3591).
 	 * Retained until the next run starts so post-settle readers
@@ -2857,6 +2858,19 @@ export class AgentSession {
 		// bookkeeping — leaving maintenance looking at the previous (e.g.
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
+			const assistant = event.message as AssistantMessage;
+			if (assistant.usage) {
+				const reportedPrompt = assistant.usage.input;
+				const modelRef = this.model ?? (assistant.model ? { id: assistant.model, provider: assistant.provider } : undefined);
+				if (modelRef && estimateProxyCacheUsage(modelRef, assistant.usage, this.#lastAssistantPromptTokens)) {
+					if (this.model) {
+						calculateCost(this.model, assistant.usage);
+					}
+				}
+				if (reportedPrompt > 0) {
+					this.#lastAssistantPromptTokens = reportedPrompt;
+				}
+			}
 			this.#lastAssistantMessage = event.message;
 		}
 		// Expected internal transitions stamp a structural suppression flag on the

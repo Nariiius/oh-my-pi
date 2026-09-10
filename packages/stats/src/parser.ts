@@ -11,6 +11,7 @@ import {
 	type Usage,
 } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { estimateProxyCacheUsage } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
@@ -441,6 +442,7 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	if (start > 0) {
 		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
 	}
+	let lastAssistantPromptTokens = 0;
 	for (const entry of entries) {
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
@@ -466,7 +468,22 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		}
 		if (isAssistantMessage(entry)) {
 			const msgStats = extractStats(sessionPath, folder, entry, currentServiceTier, agentType);
-			if (msgStats) stats.push(msgStats);
+			if (msgStats) {
+				const reportedPrompt = msgStats.usage.input;
+				if (
+					estimateProxyCacheUsage(
+						{ id: msgStats.model, provider: msgStats.provider },
+						msgStats.usage,
+						lastAssistantPromptTokens,
+					)
+				) {
+					msgStats.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+				}
+				if (reportedPrompt > 0) {
+					lastAssistantPromptTokens = reportedPrompt;
+				}
+				stats.push(msgStats);
+			}
 			toolCalls.push(...extractToolCalls(sessionPath, folder, entry, agentType));
 			// Link assistant's responding model back to the user message it answered.
 			const parentId = (entry as SessionMessageEntry).parentId;

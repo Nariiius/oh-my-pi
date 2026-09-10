@@ -4563,19 +4563,20 @@ export function processInteractionUpdate(
 function handleConversationCheckpointUpdate(
 	checkpoint: ConversationStateStructure,
 	output: AssistantMessage,
-	usageState: UsageState,
+	_usageState: UsageState,
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 ): void {
 	onConversationCheckpoint?.(checkpoint);
-	if (usageState.sawTokenDelta) {
-		return;
-	}
 	const usedTokens = checkpoint.tokenDetails?.usedTokens ?? 0;
 	if (usedTokens <= 0) {
 		return;
 	}
 	if (output.usage.contextTokens !== usedTokens) {
 		output.usage.contextTokens = usedTokens;
+	}
+	if (output.usage.input === 0 && usedTokens > 0) {
+		output.usage.input = usedTokens;
+		output.usage.totalTokens = output.usage.input + output.usage.output;
 	}
 }
 
