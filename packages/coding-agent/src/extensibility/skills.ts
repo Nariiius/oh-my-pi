@@ -448,7 +448,10 @@ const MID_PROMPT_SKILL_RE = /(^|\s)\/skill:([^\s/]+)(\s|$)/;
  * their bodies routinely contain `/skill:<name>` references that are not
  * meant as skill invocations.
  */
-export function parseSkillInvocation(text: string): ParsedSkillInvocation | undefined {
+export function parseSkillInvocation(
+	text: string,
+	isSkillName?: (name: string) => boolean,
+): ParsedSkillInvocation | undefined {
 	const trimmedStart = text.trimStart();
 	if (trimmedStart.startsWith("/skill:")) {
 		const spaceIndex = trimmedStart.indexOf(" ");
@@ -458,7 +461,17 @@ export function parseSkillInvocation(text: string): ParsedSkillInvocation | unde
 		const args = spaceIndex === -1 ? "" : trimmedStart.slice(spaceIndex + 1).trim();
 		return { name, args };
 	}
-	if (trimmedStart.startsWith("/")) return undefined;
+	if (trimmedStart.startsWith("/")) {
+		if (isSkillName) {
+			const spaceIndex = trimmedStart.indexOf(" ");
+			const name = spaceIndex === -1 ? trimmedStart.slice(1) : trimmedStart.slice(1, spaceIndex);
+			if (name && isSkillName(name)) {
+				const args = spaceIndex === -1 ? "" : trimmedStart.slice(spaceIndex + 1).trim();
+				return { name, args };
+			}
+		}
+		return undefined;
+	}
 	if (startsWithLocalExecutionPrefix(trimmedStart)) return undefined;
 	const match = MID_PROMPT_SKILL_RE.exec(text);
 	if (!match) return undefined;

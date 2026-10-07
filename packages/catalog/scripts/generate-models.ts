@@ -32,6 +32,7 @@ import {
 } from "../src/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
+import { ANTIGRAVITY_CURATED_FALLBACK_MODELS } from "../src/provider-models/google";
 import {
 	ABLITERATION_STATIC_MODELS,
 	AIAND_STATIC_MODELS,
@@ -605,6 +606,9 @@ async function generateModels() {
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in
 	// applyAnthropicCatalogPolicy.
 	allModels.push(...ANTHROPIC_CURATED_FALLBACK_MODELS);
+	// Seed Antigravity models available on paid Pro/Ultra tiers (such as Claude Opus 5.5 /
+	// Sonnet 5.5) so they are always in the generated bundle regardless of discovery credentials.
+	allModels.push(...ANTIGRAVITY_CURATED_FALLBACK_MODELS);
 	// Seed GLM-5.3 on the z.AI provider. GLM-5.3 is live on the Anthropic and
 	// coding endpoints but not yet advertised in `/v1/models` (which still tops
 	// out at glm-5.2), so endpoint discovery misses it. The zai provider is not

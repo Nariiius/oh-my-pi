@@ -656,7 +656,13 @@ FROM model_usage_legacy
 			const now = Date.now();
 			this.#db.transaction((batch: ReadonlyArray<ModelProbeInput>) => {
 				for (const result of batch) {
-					stmt.run(result.selector, result.ok ? 1 : 0, result.latencyMs, result.error ?? null, result.probedAt ?? now);
+					stmt.run(
+						result.selector,
+						result.ok ? 1 : 0,
+						result.latencyMs,
+						result.error ?? null,
+						result.probedAt ?? now,
+					);
 				}
 			})(results);
 		} catch (error) {

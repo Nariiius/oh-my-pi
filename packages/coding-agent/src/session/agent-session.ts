@@ -2861,7 +2861,8 @@ export class AgentSession {
 			const assistant = event.message as AssistantMessage;
 			if (assistant.usage) {
 				const reportedPrompt = assistant.usage.input;
-				const modelRef = this.model ?? (assistant.model ? { id: assistant.model, provider: assistant.provider } : undefined);
+				const modelRef =
+					this.model ?? (assistant.model ? { id: assistant.model, provider: assistant.provider } : undefined);
 				if (modelRef && estimateProxyCacheUsage(modelRef, assistant.usage, this.#lastAssistantPromptTokens)) {
 					if (this.model) {
 						calculateCost(this.model, assistant.usage);

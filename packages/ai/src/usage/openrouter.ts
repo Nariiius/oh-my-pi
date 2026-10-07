@@ -25,10 +25,7 @@ export async function fetchOpenRouterUsage(
 	params: UsageFetchParams,
 	ctx: UsageFetchContext,
 ): Promise<UsageReport | null> {
-	const apiKey =
-		params.credential.type === "api_key"
-			? params.credential.apiKey
-			: params.credential.accessToken;
+	const apiKey = params.credential.type === "api_key" ? params.credential.apiKey : params.credential.accessToken;
 	if (!apiKey) return null;
 
 	try {
@@ -63,7 +60,10 @@ export async function fetchOpenRouterUsage(
 
 		limits.push({
 			id: "openrouter:credits",
-			label: limit !== undefined ? `Credits ($${usage.toFixed(2)} / $${limit.toFixed(2)})` : `Spend ($${usage.toFixed(2)})`,
+			label:
+				limit !== undefined
+					? `Credits ($${usage.toFixed(2)} / $${limit.toFixed(2)})`
+					: `Spend ($${usage.toFixed(2)})`,
 			scope: { provider: "openrouter" },
 			amount,
 			status: amount.usedFraction !== undefined && amount.usedFraction >= 0.9 ? "warning" : "ok",

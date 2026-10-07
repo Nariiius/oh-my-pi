@@ -32,7 +32,7 @@ export const getGeminiCliHeaders = (modelId?: string) => ({
  * client the version and manifest are captured from, independent of the host
  * platform. Overrides: PI_AI_ANTIGRAVITY_VERSION / _CL / _OS / _ARCH.
  */
-export const DEFAULT_ANTIGRAVITY_VERSION = "2.8.0";
+export const DEFAULT_ANTIGRAVITY_VERSION = "2.19.1";
 
 const ANTIGRAVITY_VERSION_MANIFEST_URL =
 	"https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml";
@@ -128,7 +128,27 @@ export const ANTIGRAVITY_MODEL_WIRE_PROFILES: Readonly<Record<string, Antigravit
 	// 400 (`Request contains an invalid argument`). The model_enum label is
 	// untracked for these ids; the backend does not require it.
 	"claude-sonnet-4-6": { maxOutputTokens: 64000 },
+	"claude-sonnet-4-6-thinking": { maxOutputTokens: 64000 },
 	"claude-opus-4-6-thinking": { maxOutputTokens: 64000 },
+	"claude-opus-4-6": { maxOutputTokens: 64000 },
+	"claude-opus-5-5-low": { modelEnum: "MODEL_PLACEHOLDER_M400", maxOutputTokens: 64000 },
+	"claude-opus-5-5-medium": { modelEnum: "MODEL_PLACEHOLDER_M401", maxOutputTokens: 64000 },
+	"claude-opus-5-5-high": { modelEnum: "MODEL_PLACEHOLDER_M402", maxOutputTokens: 64000 },
+	"claude-sonnet-5-5-low": { modelEnum: "MODEL_PLACEHOLDER_M403", maxOutputTokens: 64000 },
+	"claude-sonnet-5-5-medium": { modelEnum: "MODEL_PLACEHOLDER_M404", maxOutputTokens: 64000 },
+	"claude-sonnet-5-5-high": { modelEnum: "MODEL_PLACEHOLDER_M405", maxOutputTokens: 64000 },
+	"claude-opus-5": { maxOutputTokens: 64000 },
+	"claude-opus-5-thinking": { maxOutputTokens: 64000 },
+	"claude-sonnet-5": { maxOutputTokens: 64000 },
+	"claude-sonnet-5-thinking": { maxOutputTokens: 64000 },
+	"claude-opus-4-8": { maxOutputTokens: 64000 },
+	"claude-opus-4-8-thinking": { maxOutputTokens: 64000 },
+	"claude-opus-4-7": { maxOutputTokens: 64000 },
+	"claude-opus-4-7-thinking": { maxOutputTokens: 64000 },
+	"claude-opus-4-5": { maxOutputTokens: 64000 },
+	"claude-opus-4-5-thinking": { maxOutputTokens: 64000 },
+	"claude-sonnet-4-5": { maxOutputTokens: 64000 },
+	"claude-sonnet-4-5-thinking": { maxOutputTokens: 64000 },
 };
 export function getAntigravityModelWireProfile(wireModelId: string): AntigravityModelWireProfile | undefined {
 	return ANTIGRAVITY_MODEL_WIRE_PROFILES[wireModelId];

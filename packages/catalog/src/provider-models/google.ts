@@ -1,10 +1,11 @@
 import { reviewedCollapseTable } from "../compat/collapse";
 import { classifyModel } from "../compat/taxonomy";
-import { fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
+import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
+import { Effort } from "../effort";
 import { fetchGeminiModels } from "../discovery/gemini";
 import { fetchGeminiCliQuotaModels } from "../discovery/gemini-cli";
 import type { ModelManagerOptions } from "../model-manager";
-import type { FetchImpl } from "../types";
+import type { FetchImpl, ModelSpec } from "../types";
 
 export interface GoogleModelManagerConfig {
 	apiKey?: string;
@@ -35,6 +36,117 @@ export interface GoogleGeminiCliModelManagerConfig {
 
 const CLOUD_CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
 const GEMINI_37_FLASH_CACHE_MIGRATION_MODEL_IDS = ["gemini-3.7-flash"] as const;
+
+/**
+ * Curated fallback models for Google Antigravity.
+ * These ensure that flagships (such as Claude Opus 5.5 / Sonnet 5.5 available on
+ * paid Antigravity Pro/Ultra tiers) are always part of the catalog even when
+ * generation is unauthenticated or uses an entitlement-limited account.
+ */
+export const ANTIGRAVITY_CURATED_FALLBACK_MODELS: readonly ModelSpec<"google-gemini-cli">[] = [
+	{
+		id: "claude-opus-5-5",
+		name: "Claude Opus 5.5",
+		api: "google-gemini-cli",
+		provider: "google-antigravity",
+		baseUrl: ANTIGRAVITY_PRIMARY_ENDPOINT,
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: 1_000_000,
+		maxTokens: 64_000,
+		cost: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+		requestModelId: "claude-opus-5-5-medium",
+		thinking: {
+			mode: "budget",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+		},
+	},
+	{
+		id: "claude-sonnet-5-5",
+		name: "Claude Sonnet 5.5",
+		api: "google-gemini-cli",
+		provider: "google-antigravity",
+		baseUrl: ANTIGRAVITY_PRIMARY_ENDPOINT,
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: 1_000_000,
+		maxTokens: 64_000,
+		cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+		requestModelId: "claude-sonnet-5-5-low",
+		thinking: {
+			mode: "budget",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+		},
+	},
+	{
+		id: "claude-opus-5",
+		name: "Claude Opus 5",
+		api: "google-gemini-cli",
+		provider: "google-antigravity",
+		baseUrl: ANTIGRAVITY_PRIMARY_ENDPOINT,
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: 1_000_000,
+		maxTokens: 64_000,
+		cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		requestModelId: "claude-opus-5-thinking",
+		thinking: {
+			mode: "budget",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+		},
+	},
+	{
+		id: "claude-sonnet-5",
+		name: "Claude Sonnet 5",
+		api: "google-gemini-cli",
+		provider: "google-antigravity",
+		baseUrl: ANTIGRAVITY_PRIMARY_ENDPOINT,
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: 1_000_000,
+		maxTokens: 64_000,
+		cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+		requestModelId: "claude-sonnet-5-thinking",
+		thinking: {
+			mode: "budget",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+		},
+	},
+	{
+		id: "claude-opus-4-8",
+		name: "Claude Opus 4.8",
+		api: "google-gemini-cli",
+		provider: "google-antigravity",
+		baseUrl: ANTIGRAVITY_PRIMARY_ENDPOINT,
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: 1_000_000,
+		maxTokens: 64_000,
+		cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		requestModelId: "claude-opus-4-8-thinking",
+		thinking: {
+			mode: "budget",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+		},
+	},
+	{
+		id: "claude-opus-4-7",
+		name: "Claude Opus 4.7",
+		api: "google-gemini-cli",
+		provider: "google-antigravity",
+		baseUrl: ANTIGRAVITY_PRIMARY_ENDPOINT,
+		reasoning: true,
+		input: ["text", "image"],
+		contextWindow: 1_000_000,
+		maxTokens: 64_000,
+		cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+		requestModelId: "claude-opus-4-7-thinking",
+		thinking: {
+			mode: "budget",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+		},
+	},
+];
 
 function toDiscoveryFetch(fetchImpl: FetchImpl | undefined): typeof fetch | undefined {
 	if (!fetchImpl) {

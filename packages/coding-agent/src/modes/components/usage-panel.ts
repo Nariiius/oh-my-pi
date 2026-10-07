@@ -312,7 +312,9 @@ export class UsagePanelComponent implements Component {
 						for (const cred of resetCredits.credits) {
 							if (cred.expiresAt) {
 								const expMs = Date.parse(cred.expiresAt);
-								const expText = !Number.isNaN(expMs) ? formatResetCountdown(expMs, this.#nowMs) : cred.expiresAt;
+								const expText = !Number.isNaN(expMs)
+									? formatResetCountdown(expMs, this.#nowMs)
+									: cred.expiresAt;
 								lines.push({
 									text: `      ${theme.fg("dim", `• 1 credit (${expText})`)}`,
 									provider,
@@ -359,9 +361,7 @@ export class UsagePanelComponent implements Component {
 
 		// API Key providers (e.g. GMI, NVIDIA, DeepSeek, AgentRouter, etc.)
 		const reportedProviders = new Set(this.#reports.map(r => r.provider.toLowerCase()));
-		const filteredApiProviders = this.#apiKeyProviders.filter(
-			p => !reportedProviders.has(p.provider.toLowerCase()),
-		);
+		const filteredApiProviders = this.#apiKeyProviders.filter(p => !reportedProviders.has(p.provider.toLowerCase()));
 
 		for (const apiProv of filteredApiProviders) {
 			const provider = apiProv.provider;
@@ -402,7 +402,12 @@ export class UsagePanelComponent implements Component {
 				}
 			}
 
-			if (apiProv.sessionUsage && (apiProv.sessionUsage.inputTokens > 0 || apiProv.sessionUsage.outputTokens > 0 || apiProv.sessionUsage.cost > 0)) {
+			if (
+				apiProv.sessionUsage &&
+				(apiProv.sessionUsage.inputTokens > 0 ||
+					apiProv.sessionUsage.outputTokens > 0 ||
+					apiProv.sessionUsage.cost > 0)
+			) {
 				const totalTokens = apiProv.sessionUsage.inputTokens + apiProv.sessionUsage.outputTokens;
 				const tokensStr = totalTokens < 1000 ? `${totalTokens}` : `${(totalTokens / 1000).toFixed(1)}k`;
 				lines.push({
@@ -415,7 +420,9 @@ export class UsagePanelComponent implements Component {
 		}
 
 		if (lines.length === 0) {
-			lines.push({ text: theme.fg("muted", query ? `No usage records match "${query}"` : "No usage data available.") });
+			lines.push({
+				text: theme.fg("muted", query ? `No usage records match "${query}"` : "No usage data available."),
+			});
 		}
 
 		return lines;
@@ -560,12 +567,7 @@ export class UsagePanelComponent implements Component {
 		const listBudget = Math.max(MIN_VISIBLE, termRows - CHROME_ROWS);
 
 		const lines = this.#buildLines(width);
-		const { selectedIndex, scrollOffset } = clampSelection(
-			this.#cursor,
-			this.#scrollStart,
-			lines.length,
-			listBudget,
-		);
+		const { selectedIndex, scrollOffset } = clampSelection(this.#cursor, this.#scrollStart, lines.length, listBudget);
 		this.#cursor = selectedIndex;
 		this.#scrollStart = scrollOffset;
 
@@ -583,11 +585,7 @@ export class UsagePanelComponent implements Component {
 		out.push(row(theme.fg("muted", headerStatus), width));
 
 		const renderedRowStrings: string[] = [];
-		for (
-			let rowIndex = scrollOffset;
-			rowIndex < Math.min(lines.length, scrollOffset + listBudget);
-			rowIndex++
-		) {
+		for (let rowIndex = scrollOffset; rowIndex < Math.min(lines.length, scrollOffset + listBudget); rowIndex++) {
 			const item = lines[rowIndex]!;
 			const isSelected = rowIndex === this.#cursor;
 			const cursorMark = isSelected ? theme.fg("accent", "› ") : "  ";

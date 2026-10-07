@@ -72,7 +72,6 @@ collapse {
 		budget "low" "1001"
 		budget "high" "10001"
 		retired "gemini-3.1-pro-high"
-		suppress-when-off #true
 	}
 	variant-family "google-antigravity" "gemini-3-pro" name="Gemini 3 Pro" {
 		members "gemini-3-pro-low" "gemini-3-pro-high"
@@ -99,6 +98,50 @@ collapse {
 		mode "budget"
 		efforts "minimal" "low" "medium" "high"
 		retired "claude-opus-4-6"
+	}
+	variant-family "google-antigravity" "claude-opus-5-5" name="Claude Opus 5.5" {
+		members "claude-opus-5-5-low" "claude-opus-5-5-medium" "claude-opus-5-5-high"
+		route "minimal" "claude-opus-5-5-low"
+		route "low" "claude-opus-5-5-low"
+		route "medium" "claude-opus-5-5-medium"
+		route "high" "claude-opus-5-5-high"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		default-member "claude-opus-5-5-medium"
+	}
+	variant-family "google-antigravity" "claude-sonnet-5-5" name="Claude Sonnet 5.5" {
+		members "claude-sonnet-5-5-low" "claude-sonnet-5-5-medium" "claude-sonnet-5-5-high"
+		route "minimal" "claude-sonnet-5-5-low"
+		route "low" "claude-sonnet-5-5-low"
+		route "medium" "claude-sonnet-5-5-medium"
+		route "high" "claude-sonnet-5-5-high"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		default-member "claude-sonnet-5-5-low"
+	}
+	variant-family "google-antigravity" "claude-opus-5" name="Claude Opus 5" {
+		members "claude-opus-5-thinking" "claude-opus-5"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		preserve-absent-effort-routes #true
+	}
+	variant-family "google-antigravity" "claude-sonnet-5" name="Claude Sonnet 5" {
+		members "claude-sonnet-5-thinking" "claude-sonnet-5"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		preserve-absent-effort-routes #true
+	}
+	variant-family "google-antigravity" "claude-opus-4-8" name="Claude Opus 4.8" {
+		members "claude-opus-4-8-thinking" "claude-opus-4-8"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		preserve-absent-effort-routes #true
+	}
+	variant-family "google-antigravity" "claude-opus-4-7" name="Claude Opus 4.7" {
+		members "claude-opus-4-7-thinking" "claude-opus-4-7"
+		mode "budget"
+		efforts "minimal" "low" "medium" "high"
+		preserve-absent-effort-routes #true
 	}
 	variant-family "google-antigravity" "claude-sonnet-4-5" name="Claude Sonnet 4.5" {
 		members "claude-sonnet-4-5" "claude-sonnet-4-5-thinking"
@@ -636,6 +679,22 @@ collapse {
 	provider-alias "devin" "grok-4.6" "grok-4-6"
 	provider-alias "devin" "swe-1.7" "swe-1-7"
 	provider-alias "devin" "swe-1.7-lightning" "swe-1-7-lightning"
+	provider-alias "google-antigravity" "opus-5.5" "claude-opus-5-5"
+	provider-alias "google-antigravity" "opus-5" "claude-opus-5"
+	provider-alias "google-antigravity" "opus-4.8" "claude-opus-4-8"
+	provider-alias "google-antigravity" "opus-4.7" "claude-opus-4-7"
+	provider-alias "google-antigravity" "opus-4.6" "claude-opus-4-6"
+	provider-alias "google-antigravity" "sonnet-5.5" "claude-sonnet-5-5"
+	provider-alias "google-antigravity" "sonnet-5" "claude-sonnet-5"
+	provider-alias "google-antigravity" "sonnet-4.6" "claude-sonnet-4-6"
+	provider-alias "gemini-antigravity" "opus-5.5" "claude-opus-5-5"
+	provider-alias "gemini-antigravity" "opus-5" "claude-opus-5"
+	provider-alias "gemini-antigravity" "opus-4.8" "claude-opus-4-8"
+	provider-alias "gemini-antigravity" "opus-4.7" "claude-opus-4-7"
+	provider-alias "gemini-antigravity" "opus-4.6" "claude-opus-4-6"
+	provider-alias "gemini-antigravity" "sonnet-5.5" "claude-sonnet-5-5"
+	provider-alias "gemini-antigravity" "sonnet-5" "claude-sonnet-5"
+	provider-alias "gemini-antigravity" "sonnet-4.6" "claude-sonnet-4-6"
 	variant-family "cursor" "cursor-grok-4.5" name="Grok 4.5" {
 		members "cursor-grok-4.5-low" "cursor-grok-4.5-medium" "cursor-grok-4.5-high"
 		route "low" "cursor-grok-4.5-low"

@@ -2433,3 +2433,75 @@ describe("Devin selector parity", () => {
 		expect(resolveProviderModelReference("devin", "claude-mythos-9-high", withRaw)?.id).toBe("claude-mythos-9-high");
 	});
 });
+
+describe("Antigravity / gemini-antigravity selector parity", () => {
+	const antigravityModels: Model<Api>[] = [
+		buildModel({
+			id: "claude-opus-5-5",
+			name: "Claude Opus 5.5",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 64_000,
+			cost: { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+			thinking: { mode: "budget", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+		}),
+		buildModel({
+			id: "claude-sonnet-5-5",
+			name: "Claude Sonnet 5.5",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 64_000,
+			cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+			thinking: { mode: "budget", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+		}),
+		buildModel({
+			id: "gemini-3.8-flash",
+			name: "Gemini 3.8 Flash",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_048_576,
+			maxTokens: 65_536,
+			cost: { input: 0.1, output: 0.4, cacheRead: 0.025, cacheWrite: 0.1 },
+			thinking: {
+				mode: "google-level",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				requiresEffort: true,
+			},
+		}),
+	];
+
+	test("resolves opus 5.5 with google-antigravity and gemini-antigravity", () => {
+		expect(resolveProviderModelReference("google-antigravity", "opus-5.5", antigravityModels)?.id).toBe(
+			"claude-opus-5-5",
+		);
+		expect(resolveProviderModelReference("google-antigravity", "opus 5.5", antigravityModels)?.id).toBe(
+			"claude-opus-5-5",
+		);
+		expect(resolveProviderModelReference("gemini-antigravity", "opus-5.5", antigravityModels)?.id).toBe(
+			"claude-opus-5-5",
+		);
+		expect(resolveProviderModelReference("gemini-antigravity", "opus 5.5", antigravityModels)?.id).toBe(
+			"claude-opus-5-5",
+		);
+		expect(resolveProviderModelReference("gemini-antigravity", "claude-opus-5-5", antigravityModels)?.id).toBe(
+			"claude-opus-5-5",
+		);
+		expect(resolveProviderModelReference("gemini-antigravity", "gemini-3.8-flash", antigravityModels)?.id).toBe(
+			"gemini-3.8-flash",
+		);
+		expect(resolveProviderModelReference("gemini-antigravity", "sonnet-5.5", antigravityModels)?.id).toBe(
+			"claude-sonnet-5-5",
+		);
+	});
+});

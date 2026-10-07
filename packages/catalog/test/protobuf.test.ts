@@ -46,6 +46,12 @@ const StringMapSchema = pb<StringMap>("test.StringMap", [
 	{ no: 1, name: "entries", kind: "map", K: "string", V: "string" },
 ]);
 
+interface BinaryPayload extends ProtoMessage {
+	data: Uint8Array;
+}
+
+const BinaryPayloadSchema = pb<BinaryPayload>("test.BinaryPayload", [{ no: 1, name: "data", kind: "bytes" }]);
+
 it("preserves selected oneofs and explicit optional defaults", () => {
 	const decoded = EnvelopeSchema.decode(
 		EnvelopeSchema.encode({ enabled: false, choice: { case: "text", value: "hello" } }),
@@ -89,4 +95,16 @@ it("round-trips a map whose key is __proto__ without prototype pollution", () =>
 	const json = StringMapSchema.toJson(decoded) as { entries: Record<string, string> };
 	expect(Object.keys(json.entries).sort()).toEqual(["__proto__", "safe"]);
 	expect(Reflect.get(json.entries, "__proto__")).toBe("polluted");
+});
+
+it("encodes bytes from ArrayBuffer, views, and serialized Buffer objects", () => {
+	const fromView = BinaryPayloadSchema.encode({
+		data: new Uint8Array([1, 2, 3]).subarray(1) as unknown as Uint8Array,
+	});
+	expect(BinaryPayloadSchema.decode(fromView).data).toEqual(new Uint8Array([2, 3]));
+
+	const fromBufferObj = BinaryPayloadSchema.encode({
+		data: { type: "Buffer", data: [4, 5, 6] } as unknown as Uint8Array,
+	});
+	expect(BinaryPayloadSchema.decode(fromBufferObj).data).toEqual(new Uint8Array([4, 5, 6]));
 });

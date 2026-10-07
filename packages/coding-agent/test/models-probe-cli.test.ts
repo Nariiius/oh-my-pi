@@ -391,11 +391,7 @@ describe("runModelsProbe", () => {
 		}
 
 		// prov-b/existing should be preserved; prov-a/old-failing should be removed; new-working and old-working should be present
-		expect(settings.get("enabledModels")).toEqual([
-			"prov-a/new-working",
-			"prov-a/old-working",
-			"prov-b/existing",
-		]);
+		expect(settings.get("enabledModels")).toEqual(["prov-a/new-working", "prov-a/old-working", "prov-b/existing"]);
 	});
 
 	test("startBackgroundStartupModelProbe automatically probes when stale or never probed", async () => {

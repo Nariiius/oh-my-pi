@@ -692,4 +692,22 @@ describe("parseSkillInvocation", () => {
 			expect(parseSkillInvocation("see /skill:foo/bar")).toBeUndefined();
 		});
 	});
+
+	describe("leading direct `/<name>` form", () => {
+		const isSkill = (name: string) => name === "humanizer" || name === "reviewer";
+
+		it("parses direct slash command when isSkillName returns true", () => {
+			expect(parseSkillInvocation("/humanizer", isSkill)).toEqual({ name: "humanizer", args: "" });
+			expect(parseSkillInvocation("/humanizer please edit this", isSkill)).toEqual({
+				name: "humanizer",
+				args: "please edit this",
+			});
+		});
+
+		it("returns undefined for unknown commands or when isSkillName is omitted", () => {
+			expect(parseSkillInvocation("/humanizer")).toBeUndefined();
+			expect(parseSkillInvocation("/unknown", isSkill)).toBeUndefined();
+			expect(parseSkillInvocation("/compact", isSkill)).toBeUndefined();
+		});
+	});
 });

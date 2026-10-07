@@ -153,7 +153,9 @@ describe("Composer prepaint", () => {
 			expect(mode.editor.getCursor()).toEqual(expectedCursor);
 			expect(terminal.starts).toBe(1);
 			const adoptedEditor = Bun.stripANSI(mode.editor.render(40).join("\n"));
-			expect(adoptedEditor.startsWith("+") || adoptedEditor.startsWith("-") || adoptedEditor.startsWith("─")).toBe(true);
+			expect(adoptedEditor.startsWith("+") || adoptedEditor.startsWith("-") || adoptedEditor.startsWith("─")).toBe(
+				true,
+			);
 			expect(adoptedEditor).not.toContain("╭");
 
 			terminal.sendInput("\x03");

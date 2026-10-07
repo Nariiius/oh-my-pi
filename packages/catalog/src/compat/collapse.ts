@@ -36,6 +36,7 @@
  */
 import { buildModel } from "../build";
 import { Effort, THINKING_EFFORTS } from "../effort";
+import { canonicalizeProvider } from "../models";
 import type { Api, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
 import { resolveModelPolicy } from "./resolve";
 import { parseRevision, parseRevisionConstraint, type RevisionTerm, revisionSatisfies } from "./revision";
@@ -487,7 +488,8 @@ const REVIEWED_COLLAPSE_TABLES: Readonly<Record<string, VariantCollapseTable>> =
  * Discovery uses this accessor to preserve injectable table seams.
  */
 export function reviewedCollapseTable(provider: string): VariantCollapseTable | undefined {
-	return REVIEWED_COLLAPSE_TABLES[provider] ?? REVIEWED_COLLAPSE_TABLES[provider.toLowerCase()];
+	const canonical = canonicalizeProvider(provider);
+	return REVIEWED_COLLAPSE_TABLES[canonical] ?? REVIEWED_COLLAPSE_TABLES[canonical.toLowerCase()];
 }
 
 /**
@@ -1164,10 +1166,11 @@ function getAliasIndex(table: VariantCollapseTable): VariantAliasIndex {
  * lookup first because a live model always wins over an alias.
  */
 export function resolveVariantSelector(provider: Provider, modelId: string): string | undefined {
+	const canonical = canonicalizeProvider(provider);
 	const normalized = modelId.trim().toLowerCase();
-	const registered = resolveRegisteredVariantAlias(provider, normalized);
+	const registered = resolveRegisteredVariantAlias(canonical, normalized);
 	if (registered !== undefined) return registered;
-	const table = reviewedCollapseTable(provider);
+	const table = reviewedCollapseTable(canonical);
 	return table ? getAliasIndex(table).providerScoped.get(normalized) : undefined;
 }
 

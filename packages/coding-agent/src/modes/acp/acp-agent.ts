@@ -69,6 +69,7 @@ import type { UsageStatistics } from "../../session/session-entries";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
+import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES } from "../../slash-commands/builtin-registry";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
@@ -1042,7 +1043,12 @@ export class AcpAgent implements Agent {
 		if (!record.session.skillsSettings?.enableSkillCommands) {
 			return false;
 		}
-		const parsed = parseSkillInvocation(text);
+		const parsed = parseSkillInvocation(
+			text,
+			name =>
+				!BUILTIN_SLASH_COMMAND_RESERVED_NAMES.has(name) &&
+				record.session.skills.some(candidate => candidate.name === name),
+		);
 		if (!parsed) {
 			return false;
 		}

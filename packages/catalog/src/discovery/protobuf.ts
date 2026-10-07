@@ -139,7 +139,7 @@ export function pb<T extends ProtoMessage = ProtoMessage>(
 	}
 
 	const codec = ((arg: T | Uint8Array) => {
-		if (arg instanceof Uint8Array) return getCodec().decode(arg);
+		if (arg instanceof Uint8Array || ArrayBuffer.isView(arg)) return getCodec().decode(requireBytes(arg));
 		return getCodec().encode(arg);
 	}) as MessageCodec<T>;
 
@@ -218,7 +218,7 @@ function compileCodec<T extends ProtoMessage>(typeName: string, fieldDescs: read
 	}
 
 	const codec: MessageCodec<T> = ((arg: T | Uint8Array) => {
-		if (arg instanceof Uint8Array) return codec.decode(arg);
+		if (arg instanceof Uint8Array || ArrayBuffer.isView(arg)) return codec.decode(requireBytes(arg));
 		return codec.encode(arg);
 	}) as MessageCodec<T>;
 
@@ -638,6 +638,18 @@ function requireBoolean(value: unknown): boolean {
 
 function requireBytes(value: unknown): Uint8Array {
 	if (value instanceof Uint8Array) return value;
+	if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+	if (value instanceof ArrayBuffer) return new Uint8Array(value);
+	if (
+		value &&
+		typeof value === "object" &&
+		"type" in value &&
+		value.type === "Buffer" &&
+		"data" in value &&
+		Array.isArray(value.data)
+	) {
+		return new Uint8Array(value.data);
+	}
 	throw new Error("Expected Uint8Array");
 }
 
@@ -720,12 +732,12 @@ function isUnknownField(value: unknown): value is ProtoUnknownField & { wireType
 		typeof value.no === "number" &&
 		typeof value.wireType === "number" &&
 		isWireType(value.wireType) &&
-		value.data instanceof Uint8Array
+		(value.data instanceof Uint8Array || ArrayBuffer.isView(value.data))
 	);
 }
 
 function isMessageObject(value: unknown): value is { [key: string]: unknown } {
-	return isRecord(value) && !(value instanceof Uint8Array);
+	return isRecord(value) && !(value instanceof Uint8Array) && !ArrayBuffer.isView(value);
 }
 
 function isWireType(value: number): value is WireType {

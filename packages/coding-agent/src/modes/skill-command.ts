@@ -1,5 +1,6 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { buildSkillPromptMessage, getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
+import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES } from "../slash-commands/builtin-registry";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../session/messages";
 import type { InteractiveModeContext } from "./types";
 
@@ -33,23 +34,42 @@ export interface BuiltSkillCommandPrompt {
 	options: SkillPromptOptions;
 }
 
-/** Return true when `text` invokes a registered `/skill:<name>` command. */
-export function isKnownSkillCommand(ctx: SkillCommandHost, text: string): boolean {
+export function resolveSkillInvocation(
+	ctx: SkillCommandHost,
+	text: string,
+): { name: string; args: string } | undefined {
 	const parsed = parseSkillInvocation(text);
-	if (!parsed) return false;
-	return ctx.skillCommands.has(getSkillSlashCommandName({ name: parsed.name }));
+	if (parsed) return parsed;
+	const trimmedStart = text.trimStart();
+	if (!trimmedStart.startsWith("/") || trimmedStart.startsWith("/skill:")) return undefined;
+	const spaceIndex = trimmedStart.indexOf(" ");
+	const rawName = spaceIndex === -1 ? trimmedStart.slice(1) : trimmedStart.slice(1, spaceIndex);
+	if (!rawName || BUILTIN_SLASH_COMMAND_RESERVED_NAMES.has(rawName)) return undefined;
+	if (ctx.skillCommands.has(getSkillSlashCommandName({ name: rawName })) || ctx.skillCommands.has(rawName)) {
+		const args = spaceIndex === -1 ? "" : trimmedStart.slice(spaceIndex + 1).trim();
+		return { name: rawName, args };
+	}
+	return undefined;
 }
 
-/** Build the user-attributed custom message for a registered `/skill:<name>` command. */
+/** Return true when `text` invokes a registered `/skill:<name>` or direct `/<name>` command. */
+export function isKnownSkillCommand(ctx: SkillCommandHost, text: string): boolean {
+	const parsed = resolveSkillInvocation(ctx, text);
+	if (!parsed) return false;
+	return ctx.skillCommands.has(getSkillSlashCommandName({ name: parsed.name })) || ctx.skillCommands.has(parsed.name);
+}
+
+/** Build the user-attributed custom message for a registered skill command. */
 export async function buildSkillCommandPrompt(
 	ctx: SkillCommandHost,
 	text: string,
 	streamingBehavior: "steer" | "followUp",
 	images?: ImageContent[],
 ): Promise<BuiltSkillCommandPrompt | undefined> {
-	const parsed = parseSkillInvocation(text);
+	const parsed = resolveSkillInvocation(ctx, text);
 	if (!parsed) return undefined;
-	const skill = ctx.skillCommands.get(getSkillSlashCommandName({ name: parsed.name }));
+	const skill =
+		ctx.skillCommands.get(getSkillSlashCommandName({ name: parsed.name })) ?? ctx.skillCommands.get(parsed.name);
 	if (!skill) return undefined;
 
 	const built = await buildSkillPromptMessage(skill, parsed.args, "user");

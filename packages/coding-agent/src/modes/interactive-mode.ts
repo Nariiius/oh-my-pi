@@ -1168,9 +1168,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			const preloaded = await options.recentSessions;
 			if (preloaded) return preloaded;
 			const sessionDir =
-				typeof this.sessionManager?.getSessionDir === "function"
-					? this.sessionManager.getSessionDir()
-					: undefined;
+				typeof this.sessionManager?.getSessionDir === "function" ? this.sessionManager.getSessionDir() : undefined;
 			const sessions = sessionDir ? await getRecentSessions(sessionDir) : [];
 			return sessions.map(s => ({ name: s.name, timeAgo: s.timeAgo }));
 		});
@@ -1479,6 +1477,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				const commandName = `skill:${skill.name}`;
 				this.skillCommands.set(commandName, skill);
 				commands.push({ name: commandName, description: skill.description, icon });
+				if (!BUILTIN_SLASH_COMMAND_RESERVED_NAMES.has(skill.name)) {
+					this.skillCommands.set(skill.name, skill);
+					commands.push({ name: skill.name, description: skill.description, icon });
+				}
 			}
 		}
 		return commands;
@@ -1487,7 +1489,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Reload session skills and the `/skill:<name>` command list. */
 	async refreshSkillState(): Promise<void> {
 		await this.session.refreshSkills();
-		const retainedCommands = this.#pendingSlashCommands.filter(command => !command.name.startsWith("skill:"));
+		const retainedCommands = this.#pendingSlashCommands.filter(
+			command => !command.name.startsWith("skill:") && !this.skillCommands.has(command.name),
+		);
 		const skillCommands = this.#rebuildSkillCommandsFromSession();
 		this.#pendingSlashCommands = [...retainedCommands, ...skillCommands];
 	}

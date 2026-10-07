@@ -30,7 +30,7 @@ import {
 	type ModelManagerOptions,
 	type ModelRefreshStrategy,
 } from "@oh-my-pi/pi-catalog/model-manager";
-import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
+import { canonicalizeProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
 	googleAntigravityModelManagerOptions,
 	googleGeminiCliModelManagerOptions,
@@ -2229,7 +2229,8 @@ export class ModelRegistry {
 
 	#modelsForProviderLookup(provider: string): Model<Api>[] {
 		if (this.#hasFullSnapshot) return this.#models;
-		const normalizedProvider = provider.trim().toLowerCase();
+		const canonical = canonicalizeProvider(provider);
+		const normalizedProvider = canonical.trim().toLowerCase();
 		if (!normalizedProvider) return [];
 		const cached = this.#providerLookupSnapshots.get(normalizedProvider);
 		if (cached) return cached;
@@ -2403,22 +2404,25 @@ export class ModelRegistry {
 	 * Find a model by provider and ID.
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
-		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+		const canonical = canonicalizeProvider(provider);
+		return resolveProviderModelReference(canonical, modelId, this.#modelsForProviderLookup(canonical));
 	}
 
 	/**
 	 * Get the base URL associated with a provider, if any model defines one.
 	 */
 	getProviderBaseUrl(provider: string): string | undefined {
-		return this.#modelsForProviderLookup(provider).find(m => m.provider === provider && m.baseUrl)?.baseUrl;
+		const canonical = canonicalizeProvider(provider);
+		return this.#modelsForProviderLookup(canonical).find(m => m.provider === canonical && m.baseUrl)?.baseUrl;
 	}
 	/**
 	 * Get provider-level headers without including per-model overrides.
 	 */
 	getProviderHeaders(provider: string): Record<string, string> | undefined {
+		const canonical = canonicalizeProvider(provider);
 		return createLiveConfigHeaders([
-			this.#providerOverrides.get(provider)?.headers,
-			this.#runtimeProviderOverrides.get(provider)?.headers,
+			this.#providerOverrides.get(canonical)?.headers,
+			this.#runtimeProviderOverrides.get(canonical)?.headers,
 		]);
 	}
 

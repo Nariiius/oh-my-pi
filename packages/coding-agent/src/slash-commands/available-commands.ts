@@ -6,7 +6,7 @@ import type { ExtensionRunner } from "../extensibility/extensions";
 import { getSkillSlashCommandName, type Skill } from "../extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { ACP_BUILTIN_RESERVED_NAMES, isAcpBuiltinShadowedName } from "./acp-builtins";
-import { BUILTIN_SLASH_COMMANDS_INTERNAL } from "./builtin-registry";
+import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, BUILTIN_SLASH_COMMANDS_INTERNAL } from "./builtin-registry";
 
 export type AvailableSlashCommandSource = "builtin" | "skill" | "extension" | "custom" | "mcp_prompt" | "file";
 
@@ -64,6 +64,14 @@ export async function buildAvailableSlashCommands(
 				input: { hint: "arguments" },
 				source: "skill",
 			});
+			if (!BUILTIN_SLASH_COMMAND_RESERVED_NAMES.has(skill.name)) {
+				appendCommand({
+					name: skill.name,
+					description: skill.description || `Run ${skill.name} skill`,
+					input: { hint: "arguments" },
+					source: "skill",
+				});
+			}
 		}
 	}
 

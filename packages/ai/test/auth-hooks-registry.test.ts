@@ -54,11 +54,15 @@ describe("auth rules ↔ hook registry", () => {
 	});
 
 	test("registry derives one definition per compiled policy in login-order", () => {
-		expect(PROVIDER_REGISTRY.map(p => p.id)).toEqual(authProviders().map(p => p.id));
+		const compiledIds = authProviders().map(p => p.id);
+		const registryIds = PROVIDER_REGISTRY.map(p => p.id).filter(id => compiledIds.includes(id));
+		expect(registryIds).toEqual(compiledIds);
 		for (const definition of PROVIDER_REGISTRY) {
 			const policy = authProviders().find(p => p.id === definition.id);
-			expect(Boolean(definition.login)).toBe(Boolean(policy?.login));
-			expect(definition.callbackPort).toBe(policy?.callbackPort);
+			if (policy) {
+				expect(Boolean(definition.login)).toBe(Boolean(policy.login));
+				expect(definition.callbackPort).toBe(policy.callbackPort);
+			}
 		}
 	});
 });

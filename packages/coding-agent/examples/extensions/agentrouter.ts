@@ -54,8 +54,14 @@ function enforceCanonicalRootPrompt(systemPrompt: unknown): unknown {
 export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, ctx) => {
 		const model = ctx.model;
-		const provider = model && typeof model === "object" && "provider" in model && typeof model.provider === "string" ? model.provider : undefined;
-		const baseUrl = model && typeof model === "object" && "baseUrl" in model && typeof model.baseUrl === "string" ? model.baseUrl : undefined;
+		const provider =
+			model && typeof model === "object" && "provider" in model && typeof model.provider === "string"
+				? model.provider
+				: undefined;
+		const baseUrl =
+			model && typeof model === "object" && "baseUrl" in model && typeof model.baseUrl === "string"
+				? model.baseUrl
+				: undefined;
 		if (!isAgentRouter(provider, baseUrl)) return;
 		const current = event.systemPrompt ?? [];
 		const joined = current.join("\n");
@@ -68,8 +74,14 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_provider_request", async (event, ctx) => {
 		const model = ctx.model;
-		const provider = model && typeof model === "object" && "provider" in model && typeof model.provider === "string" ? model.provider : undefined;
-		const baseUrl = model && typeof model === "object" && "baseUrl" in model && typeof model.baseUrl === "string" ? model.baseUrl : undefined;
+		const provider =
+			model && typeof model === "object" && "provider" in model && typeof model.provider === "string"
+				? model.provider
+				: undefined;
+		const baseUrl =
+			model && typeof model === "object" && "baseUrl" in model && typeof model.baseUrl === "string"
+				? model.baseUrl
+				: undefined;
 		if (!isAgentRouter(provider, baseUrl)) return event.payload;
 
 		const payload = event.payload;
@@ -85,7 +97,12 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 			const first = payload.messages[0];
-			if (first && typeof first === "object" && "role" in first && (first.role === "system" || first.role === "developer")) {
+			if (
+				first &&
+				typeof first === "object" &&
+				"role" in first &&
+				(first.role === "system" || first.role === "developer")
+			) {
 				first.role = "system";
 				if ("content" in first) {
 					first.content = enforceCanonicalRootPrompt(first.content);

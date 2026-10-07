@@ -7,7 +7,7 @@ description: Grilling session that challenges your plan against the existing dom
 
 Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one.
 
-**Ask via the OpenCode `question` tool only** — one question per turn. Do not ask in markdown. After I answer, call `question` again before continuing.
+**Ask via the `ask` tool (or OpenCode `question` tool) only** — one question per turn. Do not ask in markdown. After I answer, call the question/ask tool again before continuing.
 
 When you have a recommendation, put it in the picker's option labels/descriptions (within the 30-character label limit). Do not state the recommendation in chat prose instead of using the tool.
 

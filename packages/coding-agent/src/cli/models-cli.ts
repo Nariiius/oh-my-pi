@@ -18,6 +18,7 @@
 import { type Api, completeSimple, type Effort, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { canonicalizeProvider } from "@oh-my-pi/pi-catalog/models";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
@@ -119,9 +120,12 @@ function byProviderThenId(left: Model<Api>, right: Model<Api>): number {
  */
 export function filterModelsByPattern(models: Model<Api>[], pattern: string | undefined): Model<Api>[] {
 	if (!pattern) return models;
-	const needle = pattern.toLowerCase();
+	const needle = pattern.trim().toLowerCase();
+	const canonicalNeedle = canonicalizeProvider(needle).toLowerCase();
 	let exactFound = false;
-	let filtered = models.filter(m => m.provider.toLowerCase() === needle);
+	let filtered = models.filter(
+		m => m.provider.toLowerCase() === needle || m.provider.toLowerCase() === canonicalNeedle,
+	);
 	if (filtered.length > 0) {
 		exactFound = true;
 	}
@@ -450,7 +454,7 @@ export function createModelProbe(
 				{
 					apiKey: modelRegistry.resolver(model),
 					maxTokens: 16,
-					disableReasoning: true,
+					disableReasoning: model.thinking?.requiresEffort ? false : true,
 					signal: signal
 						? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal])
 						: AbortSignal.timeout(timeoutMs),

@@ -13,30 +13,53 @@ import type { Api, KnownProvider, Model, ModelCost, TokenCost, Usage } from "./t
  */
 const modelRegistry = new Map<string, Map<string, Model<Api>>>();
 
+/**
+ * Provider aliases mapping alternate/casual provider names to their canonical IDs.
+ */
+export const PROVIDER_ALIASES: Readonly<Record<string, string>> = {
+	"gemini-antigravity": "google-antigravity",
+	antigravity: "google-antigravity",
+	"gemini-cli": "google-gemini-cli",
+};
+
+/**
+ * Canonicalizes a provider name (e.g. `gemini-antigravity` -> `google-antigravity`).
+ */
+export function canonicalizeProvider(provider: string): string {
+	const lower = provider.trim().toLowerCase();
+	return PROVIDER_ALIASES[lower] ?? provider;
+}
+
 /** Return one provider's bundled models, materialized by the generator. */
 function getProviderModels(provider: string): Map<string, Model<Api>> | undefined {
-	const cachedModels = modelRegistry.get(provider);
+	const canonical = canonicalizeProvider(provider);
+	const cachedModels = modelRegistry.get(canonical);
 	if (cachedModels !== undefined) return cachedModels;
-	if (!Object.hasOwn(MODELS, provider)) return undefined;
+	if (!Object.hasOwn(MODELS, canonical)) return undefined;
 
 	const providerModels = new Map<string, Model<Api>>();
-	const rawModels = MODELS[provider as keyof typeof MODELS];
+	const rawModels = MODELS[canonical as keyof typeof MODELS];
 	for (const id in rawModels) {
 		// models.json rows are complete Models emitted by generate-models.ts;
 		// consuming them verbatim keeps startup allocation-free.
 		const row = rawModels[id as keyof typeof rawModels] as unknown as Model<Api>;
 		// Rows baked before the compat engine (and stale cache snapshots) lack
 		// `identity`; classify lazily so consumers can rely on the field.
-		row.identity ??= classifyModel(provider, id, { lenient: true });
+		row.identity ??= classifyModel(canonical, id, { lenient: true });
 		providerModels.set(id, row);
 	}
-	modelRegistry.set(provider, providerModels);
+	modelRegistry.set(canonical, providerModels);
 	return providerModels;
 }
 
 export type GeneratedProvider = keyof typeof MODELS;
 
-export function getBundledModel<TApi extends Api = Api>(provider: GeneratedProvider, modelId: string): Model<TApi> {
+export function getBundledModel<TApi extends Api = Api>(provider: string, modelId: string): Model<TApi>;
+export function getBundledModel<TApi extends Api = Api>(provider: GeneratedProvider, modelId: string): Model<TApi>;
+export function getBundledModel<TApi extends Api = Api>(
+	provider: GeneratedProvider | string,
+	modelId: string,
+): Model<TApi> {
 	const providerModels = getProviderModels(provider);
 	return providerModels?.get(modelId) as Model<TApi>;
 }
@@ -45,7 +68,9 @@ export function getBundledProviders(): KnownProvider[] {
 	return Object.keys(MODELS) as KnownProvider[];
 }
 
-export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
+export function getBundledModels(provider: string): Model<Api>[];
+export function getBundledModels(provider: GeneratedProvider): Model<Api>[];
+export function getBundledModels(provider: GeneratedProvider | string): Model<Api>[] {
 	const models = getProviderModels(provider);
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];
 }
@@ -72,7 +97,7 @@ export function calculateUsageCost(cost: ModelCost, usage: Usage): Usage["cost"]
 	const rates = resolveTokenCost(cost, promptInputTokens);
 	usage.cost.input = (rates.input / 1000000) * (usage.input + (orchestration?.input ?? 0));
 	usage.cost.output = (rates.output / 1000000) * (usage.output + (orchestration?.output ?? 0));
-	const cacheReadRate = rates.cacheRead > 0 ? rates.cacheRead : (rates.input > 0 ? rates.input * 0.5 : 0);
+	const cacheReadRate = rates.cacheRead > 0 ? rates.cacheRead : rates.input > 0 ? rates.input * 0.5 : 0;
 	usage.cost.cacheRead = (cacheReadRate / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0));
 	usage.cost.cacheWrite = cacheWriteCost(rates, usage);
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;

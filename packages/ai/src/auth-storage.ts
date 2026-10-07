@@ -9,6 +9,7 @@
  */
 import { createHash } from "node:crypto";
 import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { canonicalizeProvider } from "@oh-my-pi/pi-catalog/models";
 import { $env, $envExact, extractRetryHint, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	isSqliteCorruptionError,
@@ -1669,7 +1670,8 @@ export class AuthStorage {
 	 * @returns Array of stored credentials, empty if none exist
 	 */
 	#getStoredCredentials(provider: string): StoredCredential[] {
-		return this.#data.get(provider) ?? [];
+		const canonical = canonicalizeProvider(provider);
+		return this.#data.get(canonical) ?? [];
 	}
 
 	/**
@@ -2541,7 +2543,7 @@ export class AuthStorage {
 	 * Get credential for a provider (first entry if multiple).
 	 */
 	get(provider: string): AuthCredential | undefined {
-		return this.#getCredentialsForProvider(provider)[0];
+		return this.#getCredentialsForProvider(canonicalizeProvider(provider))[0];
 	}
 
 	/**
@@ -2887,7 +2889,7 @@ export class AuthStorage {
 	 * Check if credentials exist for a provider in storage.
 	 */
 	has(provider: string): boolean {
-		return this.#getCredentialsForProvider(provider).length > 0;
+		return this.#getCredentialsForProvider(canonicalizeProvider(provider)).length > 0;
 	}
 
 	/**
@@ -2896,7 +2898,8 @@ export class AuthStorage {
 	 * {@link hasResolvableAuth} it ignores cross-provider env aliases so
 	 * `XAI_API_KEY` does not auto-select SuperGrok (`xai-oauth`).
 	 */
-	hasAuth(provider: string): boolean {
+	hasAuth(providerInput: string): boolean {
+		const provider = canonicalizeProvider(providerInput);
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
 		if (this.#getCredentialsForProvider(provider).length > 0) return true;
@@ -5939,6 +5942,7 @@ export class AuthStorage {
 	 * 7. Fallback resolver (models.yml custom providers, last-resort)
 	 */
 	async getApiKey(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined> {
+		provider = canonicalizeProvider(provider);
 		// Runtime override takes highest priority
 		const runtimeKey = this.#runtimeOverrides.get(provider);
 		if (runtimeKey) {
@@ -6014,6 +6018,7 @@ export class AuthStorage {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthAccess | undefined> {
+		provider = canonicalizeProvider(provider);
 		// Runtime / config overrides intentionally short-circuit OAuth: when the
 		// user has pinned an API key, they expect the OAuth identity to be
 		// suppressed (same contract as `getOAuthAccountId`).

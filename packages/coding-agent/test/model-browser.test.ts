@@ -236,7 +236,9 @@ describe("ModelBrowser native model metadata", () => {
 	});
 
 	test("models without upstream metadata render the plain detail line", () => {
-		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · free per M");
+		expect(renderDetail(makeModel("mock-provider", "free-model"))).toContain(
+			"free-model · 128k ctx · 1k out · free per M",
+		);
 	});
 });
 

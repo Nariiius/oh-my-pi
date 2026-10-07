@@ -23,7 +23,13 @@ import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-cata
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { type GeneratedProvider, getBundledModels, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import {
+	canonicalizeProvider,
+	type GeneratedProvider,
+	getBundledModels,
+	modelsAreEqual,
+	PROVIDER_ALIASES,
+} from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -507,14 +513,19 @@ export function resolveProviderModelReference(
 	modelId: string,
 	availableModels: readonly Model<Api>[],
 ): Model<Api> | undefined {
-	const normalizedProvider = provider.trim().toLowerCase();
+	const canonicalProvider = canonicalizeProvider(provider);
+	const normalizedProvider = canonicalProvider.trim().toLowerCase();
 	const normalizedModelId = modelId.trim().toLowerCase();
 	if (!normalizedProvider || !normalizedModelId) {
 		return undefined;
 	}
 
+	const dashedModelId = normalizedModelId.replace(/\s+/g, "-");
+
 	const index = getProviderModelIndex(availableModels);
-	const exact = index.get(`${normalizedProvider}\u0000${normalizedModelId}`);
+	const exact =
+		index.get(`${normalizedProvider}\u0000${normalizedModelId}`) ??
+		(dashedModelId !== normalizedModelId ? index.get(`${normalizedProvider}\u0000${dashedModelId}`) : undefined);
 	if (exact === null) {
 		return undefined; // ambiguous
 	}
@@ -528,6 +539,7 @@ export function resolveProviderModelReference(
 	const collapsedVariant = collapseVariantId(normalizedProvider, normalizedModelId);
 	const variantAliasId =
 		resolveVariantSelector(normalizedProvider, normalizedModelId) ??
+		(dashedModelId !== normalizedModelId ? resolveVariantSelector(normalizedProvider, dashedModelId) : undefined) ??
 		(collapsedVariant.thinkingVariant ? collapsedVariant.logicalId : undefined);
 	if (variantAliasId) {
 		const aliased = index.get(`${normalizedProvider}\u0000${variantAliasId.toLowerCase()}`);
@@ -540,7 +552,10 @@ export function resolveProviderModelReference(
 	// per-effort wire ids the live model routes to, so a raw upstream uid still
 	// selects its logical model. The exact lookup above keeps a live raw model
 	// winning over the collapsed carrier.
-	const routed = getProviderWireRouteIndex(availableModels).get(`${normalizedProvider}\u0000${normalizedModelId}`);
+	const wireIndex = getProviderWireRouteIndex(availableModels);
+	const routed =
+		wireIndex.get(`${normalizedProvider}\u0000${normalizedModelId}`) ??
+		(dashedModelId !== normalizedModelId ? wireIndex.get(`${normalizedProvider}\u0000${dashedModelId}`) : undefined);
 	if (routed) {
 		return routed;
 	}
@@ -555,9 +570,12 @@ export function resolveProviderModelReference(
 	// provider, keeps the selector from falling through to the exact-bare-id
 	// phase, where the dotted form is verbatim an aggregator id (OpenRouter's
 	// `anthropic/claude-fable-5.1`) and would silently re-bind the request.
-	const spelled = getProviderSpellingIndex(availableModels).get(
-		`${normalizedProvider}\u0000${revisionSpellingKey(normalizedModelId)}`,
-	);
+	const spellingIndex = getProviderSpellingIndex(availableModels);
+	const spelled =
+		spellingIndex.get(`${normalizedProvider}\u0000${revisionSpellingKey(normalizedModelId)}`) ??
+		(dashedModelId !== normalizedModelId
+			? spellingIndex.get(`${normalizedProvider}\u0000${revisionSpellingKey(dashedModelId)}`)
+			: undefined);
 	if (spelled) {
 		return spelled;
 	}
@@ -766,7 +784,7 @@ function findExactModelReferenceMatch(modelReference: string, availableModels: M
 
 	const slashIndex = trimmedReference.indexOf("/");
 	if (slashIndex !== -1) {
-		const provider = trimmedReference.substring(0, slashIndex).trim();
+		const provider = canonicalizeProvider(trimmedReference.substring(0, slashIndex).trim());
 		const modelId = trimmedReference.substring(slashIndex + 1).trim();
 		if (provider && modelId) {
 			return resolveProviderModelReference(provider, modelId, availableModels);
@@ -1949,8 +1967,16 @@ export function resolveCliModel(options: {
 	for (const model of allModels) {
 		providerMap.set(model.provider.toLowerCase(), model.provider);
 	}
+	for (const [alias, target] of Object.entries(PROVIDER_ALIASES)) {
+		const canonical = providerMap.get(target.toLowerCase());
+		if (canonical) {
+			providerMap.set(alias.toLowerCase(), canonical);
+		}
+	}
 
-	let provider = cliProvider ? providerMap.get(cliProvider.toLowerCase()) : undefined;
+	let provider = cliProvider
+		? (providerMap.get(canonicalizeProvider(cliProvider).toLowerCase()) ?? providerMap.get(cliProvider.toLowerCase()))
+		: undefined;
 	if (cliProvider && !provider) {
 		return {
 			model: undefined,

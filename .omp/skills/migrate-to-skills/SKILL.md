@@ -5,7 +5,6 @@ description: >-
   commands (.cursor/commands/*.md) to Agent Skills format (.cursor/skills/). Use
   when you want to migrate rules or commands to skills, convert .mdc rules to
   SKILL.md format, or consolidate commands into the skills directory.
-disable-model-invocation: true
 ---
 # Migrate Rules and Slash Commands to Skills
 
@@ -71,7 +70,6 @@ Instructions here...
 ---
 name: commit
 description: Commit current work with standardized message format
-disable-model-invocation: true
 ---
 # Commit current work
 Instructions here...

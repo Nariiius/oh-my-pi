@@ -16,10 +16,7 @@ import {
 } from "../../advisor";
 import { reset as resetCapabilities } from "../../capability";
 import { showGitOverlay } from "../../cli/git-tui";
-import {
-	type ModelProbeResult,
-	type ModelsProbeArgs,
-} from "../../cli/models-cli";
+import { type ModelProbeResult, type ModelsProbeArgs } from "../../cli/models-cli";
 import {
 	formatModelSelectorValue,
 	getModelMatchPreferences,
@@ -840,9 +837,7 @@ export class SelectorController {
 			},
 			{
 				onClose: async (selectors: string[] | null) => {
-					const tested = panel.getResults().filter(
-						(result): result is ModelProbeResult => result !== undefined,
-					);
+					const tested = panel.getResults().filter((result): result is ModelProbeResult => result !== undefined);
 					if (selectors !== null && tested.length > 0) {
 						let nextEnabled: string[];
 						if (options?.pattern) {
