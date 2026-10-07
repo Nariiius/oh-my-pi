@@ -114,6 +114,7 @@ const COST_UNPRICED_BACKFILL_KEY = "messages_cost_unpriced_v1";
 // Rows predating the `cost_no_cache_input` column are NULL; ingest always
 // writes a value, so one pass settles the column for good.
 const NO_CACHE_INPUT_BACKFILL_KEY = "cost_no_cache_input_v1";
+const PROXY_CACHE_READ_BACKFILL_KEY = "proxy_cache_read_v1";
 // Zero-cost rows are repriced from the bundled catalog once per release (the
 // value stored is the version that ran it), since only a catalog update can
 // price a model it could not price before.
@@ -608,11 +609,18 @@ function backfillNoCacheInputCosts(database: Database): void {
 }
 
 function backfillProxyCacheReadCosts(database: Database): void {
+	const row = database.query("SELECT value FROM meta WHERE key = ?").get(PROXY_CACHE_READ_BACKFILL_KEY) as
+		| { value: string }
+		| undefined;
+	if (row?.value === BACKFILL_COMPLETE) return;
+	const markComplete = database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+
 	const candidateSessions = database
 		.prepare(`
 			SELECT DISTINCT session_file
 			FROM messages
 			WHERE cache_read_tokens = 0
+			  AND cost_unpriced = 0
 			  AND input_tokens >= 1024
 			  AND (
 				model LIKE '%claude%' OR model LIKE '%opus%' OR model LIKE '%sonnet%' OR model LIKE '%haiku%'
@@ -624,12 +632,15 @@ function backfillProxyCacheReadCosts(database: Database): void {
 		`)
 		.all() as Array<{ session_file: string }>;
 
-	if (candidateSessions.length === 0) return;
+	if (candidateSessions.length === 0) {
+		markComplete.run(PROXY_CACHE_READ_BACKFILL_KEY, BACKFILL_COMPLETE);
+		return;
+	}
 
 	const sessionMessagesStmt = database.prepare(`
 		SELECT id, provider, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, timestamp
 		FROM messages
-		WHERE session_file = ?
+		WHERE session_file = ? AND cost_unpriced = 0
 		ORDER BY id ASC
 	`);
 
@@ -1410,6 +1421,7 @@ export function markSessionBackfillsComplete(): void {
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
 			COST_REINGEST_BACKFILL_KEY,
 			COST_UNPRICED_BACKFILL_KEY,
+			PROXY_CACHE_READ_BACKFILL_KEY,
 		]) {
 			markComplete.run(key, BACKFILL_COMPLETE);
 		}
