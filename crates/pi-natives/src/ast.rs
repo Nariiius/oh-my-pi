@@ -2,7 +2,7 @@
 
 use std::{
 	cmp::Ordering,
-	collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+	collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
 	path::{Path, PathBuf},
 };
 
@@ -13,8 +13,9 @@ use pi_ast::{
 	SupportLang,
 	ops::{self as shared_ops},
 };
+use pi_vfs::BlockingFs;
 
-use crate::{glob_util, iofs, task};
+use crate::{glob_util, iofs, shell::vfs::ShellFilesystem, task};
 
 const DEFAULT_FIND_LIMIT: u32 = 50;
 
@@ -60,13 +61,14 @@ fn resolve_strictness(value: Option<AstMatchStrictness>) -> MatchStrictness {
 }
 
 /// Options for `astGrep`: patterns, scan scope, and match limits.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct AstFindOptions<'env> {
 	/// ast-grep patterns to search for (OR across patterns).
 	pub patterns:     Option<Vec<String>>,
 	/// Language override; otherwise inferred from file extension per candidate.
 	pub lang:         Option<String>,
-	/// Single file or directory to scan (combined with `glob` when set).
+	/// Single file or directory to scan (combined with `glob` when set): a
+	/// host path or an absolute `scheme://` URL.
 	pub path:         Option<String>,
 	/// Optional glob filter relative to the search root.
 	pub glob:         Option<String>,
@@ -87,6 +89,9 @@ pub struct AstFindOptions<'env> {
 	pub signal:       Option<Unknown<'env>>,
 	/// Wall-clock timeout for the worker task in milliseconds.
 	pub timeout_ms:   Option<u32>,
+	/// Filesystem candidates are resolved, walked, and read through (native
+	/// when absent).
+	pub filesystem:   Option<ShellFilesystem>,
 }
 
 /// One ast-grep match with source range and optional meta-variables.
@@ -288,14 +293,15 @@ pub struct AstMatchResult {
 
 /// Options for `astEdit`: rewrite rules, scan scope, safety limits, and
 /// dry-run.
-#[napi(object)]
+#[napi(object, object_to_js = false)]
 pub struct AstReplaceOptions<'env> {
 	/// Map of pattern string to replacement template.
 	pub rewrites:            Option<HashMap<String, String>>,
 	/// Language override applied to every file; otherwise inferred per file, so
 	/// mixed-language paths rewrite each file in its own language.
 	pub lang:                Option<String>,
-	/// Single file or directory to rewrite.
+	/// Single file or directory to rewrite: a host path or an absolute
+	/// `scheme://` URL.
 	pub path:                Option<String>,
 	/// Optional glob filter within the search root.
 	pub glob:                Option<String>,
@@ -315,6 +321,9 @@ pub struct AstReplaceOptions<'env> {
 	pub signal:              Option<Unknown<'env>>,
 	/// Wall-clock timeout for the worker task in milliseconds.
 	pub timeout_ms:          Option<u32>,
+	/// Filesystem candidates are resolved, walked, read, and written through
+	/// (native when absent).
+	pub filesystem:          Option<ShellFilesystem>,
 }
 
 /// One textual replacement applied to a file (before/after slice and
@@ -409,35 +418,26 @@ fn is_supported_file(file_path: &Path, explicit_lang: Option<&str>) -> bool {
 	shared_ops::is_supported_file(file_path, explicit_lang)
 }
 
-fn normalize_search_path(path: Option<String>) -> Result<PathBuf> {
+fn normalize_search_path(fs: &BlockingFs, path: Option<String>) -> Result<PathBuf> {
 	let raw = path.unwrap_or_else(|| ".".to_string());
-	let candidate = PathBuf::from(raw.trim());
-	let absolute = if candidate.is_absolute() {
-		candidate
-	} else {
-		std::env::current_dir()
-			.map_err(|err| Error::from_reason(format!("Failed to resolve cwd: {err}")))?
-			.join(candidate)
-	};
-	Ok(std::fs::canonicalize(&absolute).unwrap_or(absolute))
+	let absolute = iofs::absolute_search_path(raw.trim())?;
+	Ok(iofs::canonical_search_path(fs, absolute))
 }
 
 fn collect_candidates(
+	fs: &BlockingFs,
 	path: Option<String>,
 	glob: Option<&str>,
 	ct: &task::CancelToken,
 ) -> Result<Vec<FileCandidate>> {
-	let search_path = normalize_search_path(path)?;
-	let metadata = std::fs::metadata(&search_path)
+	let search_path = normalize_search_path(fs, path)?;
+	let metadata = fs
+		.metadata(&search_path)
 		.map_err(|err| Error::from_reason(format!("Path not found: {err}")))?;
 	if metadata.is_file() {
-		let display_path = search_path
-			.file_name()
-			.and_then(|name| name.to_str())
-			.map_or_else(
-				|| search_path.to_string_lossy().into_owned(),
-				std::string::ToString::to_string,
-			);
+		let display_path = pi_vfs::file_name(&search_path)
+			.and_then(|name| name.to_str().map(str::to_string))
+			.unwrap_or_else(|| search_path.to_string_lossy().into_owned());
 		return Ok(vec![FileCandidate { absolute_path: search_path, display_path }]);
 	}
 	if !metadata.is_dir() {
@@ -457,6 +457,7 @@ fn collect_candidates(
 		filter = filter.glob(compiled);
 	}
 	let request = pi_walker::WalkRequest::new(&search_path)
+		.filesystem(fs.clone())
 		.hidden(true)
 		.gitignore(true)
 		.skip_git(true)
@@ -493,7 +494,10 @@ fn compile_pattern(
 		.map_err(|err| Error::from_reason(err.to_string()))
 }
 
-fn apply_edits(content: &str, edits: &[Edit<String>]) -> Result<String> {
+fn apply_edits<'e>(
+	content: &str,
+	edits: impl IntoIterator<Item = &'e Edit<String>>,
+) -> Result<String> {
 	shared_ops::apply_edits(content, edits).map_err(|err| Error::from_reason(err.to_string()))
 }
 
@@ -636,7 +640,10 @@ fn compile_find_patterns(
 /// Search source files with ast-grep patterns; returns a promise resolved on a
 /// worker thread.
 #[napi]
-pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
+pub fn ast_grep<'env>(
+	env: &'env Env,
+	options: AstFindOptions<'_>,
+) -> Result<PromiseRaw<'env, AstFindResult>> {
 	let AstFindOptions {
 		patterns,
 		lang,
@@ -650,18 +657,20 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 		context: _,
 		signal,
 		timeout_ms,
+		filesystem,
 	} = options;
 
+	let fs = ShellFilesystem::blocking(filesystem);
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	let normalized_limit = limit.unwrap_or(DEFAULT_FIND_LIMIT).max(1);
 	let normalized_offset = offset.unwrap_or(0);
 
-	task::blocking("ast_grep", ct, move |ct| {
+	task::filesystem(env, "ast_grep", ct, fs, move |fs, ct| {
 		let patterns = normalize_pattern_list(patterns)?;
 		let strictness = resolve_strictness(strictness);
 		let include_meta = include_meta.unwrap_or(false);
 		let lang_str = lang.as_deref().map(str::trim).filter(|v| !v.is_empty());
-		let candidates: Vec<_> = collect_candidates(path, glob.as_deref(), &ct)?
+		let candidates: Vec<_> = collect_candidates(&fs, path, glob.as_deref(), &ct)?
 			.into_iter()
 			.filter(|candidate| is_supported_file(&candidate.absolute_path, lang_str))
 			.collect();
@@ -694,7 +703,7 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 				continue;
 			};
 			let lang_key = language.canonical_name();
-			let source = match std::fs::read_to_string(&candidate.absolute_path) {
+			let source = match fs.read_to_string(&candidate.absolute_path) {
 				Ok(source) => source,
 				Err(err) => {
 					for compiled in &compiled_patterns {
@@ -904,7 +913,10 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 /// Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
 /// a promise.
 #[napi]
-pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResult> {
+pub fn ast_edit<'env>(
+	env: &'env Env,
+	options: AstReplaceOptions<'_>,
+) -> Result<PromiseRaw<'env, AstReplaceResult>> {
 	let AstReplaceOptions {
 		rewrites,
 		lang,
@@ -918,12 +930,15 @@ pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResul
 		fail_on_parse_error,
 		signal,
 		timeout_ms,
+		filesystem,
 	} = options;
 
+	let fs = ShellFilesystem::blocking(filesystem);
 	let ct = task::CancelToken::new(timeout_ms, signal);
-	task::blocking("ast_edit", ct, move |ct| {
+	task::filesystem(env, "ast_edit", ct, fs, move |fs, ct| {
 		ast_edit_blocking(
 			ct,
+			&fs,
 			rewrites,
 			lang,
 			path,
@@ -944,6 +959,7 @@ pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResul
 )]
 fn ast_edit_blocking(
 	ct: task::CancelToken,
+	fs: &BlockingFs,
 	rewrites: Option<HashMap<String, String>>,
 	lang: Option<String>,
 	path: Option<String>,
@@ -963,7 +979,7 @@ fn ast_edit_blocking(
 	let fail_on_parse_error = fail_on_parse_error.unwrap_or(false);
 
 	let lang_str = lang.as_deref().map(str::trim).filter(|v| !v.is_empty());
-	let candidates: Vec<_> = collect_candidates(path, glob.as_deref(), &ct)?
+	let candidates: Vec<_> = collect_candidates(fs, path, glob.as_deref(), &ct)?
 		.into_iter()
 		.filter(|candidate| is_supported_file(&candidate.absolute_path, lang_str))
 		.collect();
@@ -1041,7 +1057,8 @@ fn ast_edit_blocking(
 	let mut files_touched = 0u32;
 	let mut limit_reached = false;
 	// Stage writes in memory so a later compute error cannot leave earlier
-	// files partially modified on disk; flush only after the whole pass succeeds.
+	// files partially modified on disk; flush only after the whole pass
+	// succeeds.
 	let mut pending_writes: Vec<PendingWrite> = Vec::new();
 
 	for resolved in &resolved_candidates {
@@ -1074,7 +1091,7 @@ fn ast_edit_blocking(
 			continue;
 		}
 
-		let source = match std::fs::read_to_string(&candidate.absolute_path) {
+		let source = match fs.read_to_string(&candidate.absolute_path) {
 			Ok(source) => source,
 			Err(err) => {
 				if fail_on_parse_error {
@@ -1097,20 +1114,17 @@ fn ast_edit_blocking(
 		}
 
 		let mut file_changes = Vec::new();
+		// Spans already staged for this file, to drop repeats in O(1).
+		let mut staged = HashSet::new();
 		let mut reached_max_replacements = false;
 		'patterns: for &(rewrite, compiled) in &runnable_rules {
 			for matched in ast.root().find_all(compiled.clone()) {
 				ct.heartbeat()?;
 				let edit = matched.replace_by(rewrite);
-				// Multiple rules matching the same node with the same output are one
-				// deterministic edit; list and count it once instead of staging a
-				// duplicate that trips the apply-time overlap check.
-				let duplicate = file_changes.iter().any(|entry: &PendingFileChange| {
-					entry.edit.position == edit.position
-						&& entry.edit.deleted_length == edit.deleted_length
-						&& entry.edit.inserted_text == edit.inserted_text
-				});
-				if duplicate {
+				// Multiple rules matching the same node with the same output are
+				// one deterministic edit; list and count it once instead of
+				// staging a duplicate that trips the apply-time overlap check.
+				if !staged.insert((edit.position, edit.deleted_length, edit.inserted_text.clone())) {
 					continue;
 				}
 				if changes.len() + file_changes.len() >= max_replacements as usize {
@@ -1159,15 +1173,7 @@ fn ast_edit_blocking(
 		file_counts.insert(candidate.display_path.clone(), to_u32(file_changes.len()));
 
 		if !dry_run {
-			let edits: Vec<Edit<String>> = file_changes
-				.iter()
-				.map(|entry| Edit {
-					position:       entry.edit.position,
-					deleted_length: entry.edit.deleted_length,
-					inserted_text:  entry.edit.inserted_text.clone(),
-				})
-				.collect();
-			let output = apply_edits(&source, &edits)?;
+			let output = apply_edits(&source, file_changes.iter().map(|entry| &entry.edit))?;
 			if output != source {
 				pending_writes
 					.push(PendingWrite { absolute_path: candidate.absolute_path.clone(), output });
@@ -1183,9 +1189,13 @@ fn ast_edit_blocking(
 	if !dry_run {
 		for write in &pending_writes {
 			ct.heartbeat()?;
-			std::fs::write(&write.absolute_path, &write.output).map_err(|err| {
-				Error::from_reason(format!("Failed to write {}: {err}", write.absolute_path.display()))
-			})?;
+			fs.write(&write.absolute_path, &write.output)
+				.map_err(|err| {
+					Error::from_reason(format!(
+						"Failed to write {}: {err}",
+						write.absolute_path.display()
+					))
+				})?;
 		}
 	}
 
@@ -1284,9 +1294,13 @@ mod tests {
 	fn glob_star_matches_only_direct_children() {
 		let tree = make_temp_tree();
 		let ct = task::CancelToken::default();
-		let candidates =
-			collect_candidates(Some(tree.root.to_string_lossy().into_owned()), Some("*.ts"), &ct)
-				.expect("candidate collection should succeed");
+		let candidates = collect_candidates(
+			&BlockingFs::native(),
+			Some(tree.root.to_string_lossy().into_owned()),
+			Some("*.ts"),
+			&ct,
+		)
+		.expect("candidate collection should succeed");
 		let paths = candidates
 			.into_iter()
 			.map(|file| file.display_path)
@@ -1298,9 +1312,13 @@ mod tests {
 	fn glob_double_star_matches_recursively() {
 		let tree = make_temp_tree();
 		let ct = task::CancelToken::default();
-		let candidates =
-			collect_candidates(Some(tree.root.to_string_lossy().into_owned()), Some("**/*.ts"), &ct)
-				.expect("candidate collection should succeed");
+		let candidates = collect_candidates(
+			&BlockingFs::native(),
+			Some(tree.root.to_string_lossy().into_owned()),
+			Some("**/*.ts"),
+			&ct,
+		)
+		.expect("candidate collection should succeed");
 		let paths = candidates
 			.into_iter()
 			.map(|file| file.display_path)
@@ -1334,6 +1352,7 @@ mod tests {
 
 		let result = ast_edit_blocking(
 			task::CancelToken::default(),
+			&BlockingFs::native(),
 			Some(rewrites),
 			None,
 			Some(tree.root.to_string_lossy().into_owned()),
@@ -1431,6 +1450,7 @@ mod tests {
 
 		let result = ast_edit_blocking(
 			task::CancelToken::default(),
+			&BlockingFs::native(),
 			Some(rewrites),
 			Some("ts".to_string()),
 			Some(tree.root.to_string_lossy().into_owned()),
@@ -1458,11 +1478,12 @@ mod tests {
 			.as_nanos();
 		let root = std::env::temp_dir().join(format!("pi-ast-apply-fail-{unique}"));
 		fs::create_dir_all(&root).expect("temp apply-fail dir should be created");
-		// `a.ts` rewrites cleanly under both rules (one applies, the other doesn't
-		// match).
+		// `a.ts` rewrites cleanly under both rules (one applies, the other
+		// doesn't match).
 		fs::write(root.join("a.ts"), "const a = bar;\n").expect("temp file a.ts should be written");
-		// `b.ts` matches both rules with nested ranges (`foo(bar)` contains `bar`),
-		// so `apply_edits` rejects the combined edit set with an overlap error.
+		// `b.ts` matches both rules with nested ranges (`foo(bar)` contains
+		// `bar`), so `apply_edits` rejects the combined edit set with an
+		// overlap error.
 		fs::write(root.join("b.ts"), "const b = foo(bar);\n")
 			.expect("temp file b.ts should be written");
 		TempTree { root }
@@ -1482,6 +1503,7 @@ mod tests {
 
 		let result = ast_edit_blocking(
 			task::CancelToken::default(),
+			&BlockingFs::native(),
 			Some(rewrites),
 			Some("ts".to_string()),
 			Some(tree.root.to_string_lossy().into_owned()),
@@ -1505,5 +1527,66 @@ mod tests {
 			b_before,
 			"b.ts must remain unmodified after apply failure",
 		);
+	}
+
+	#[test]
+	fn ast_edit_rewrites_provider_url_tree_through_the_filesystem() {
+		let (mem, filesystem) = crate::testing::MemFs::with_files(&[
+			("mem://root/src/a.ts", "const f = (x) => x;\n"),
+			("mem://root/src/nested/b.ts", "const g = (y) => y;\n"),
+			("mem://root/other.ts", "const h = (z) => z;\n"),
+		]);
+		let mut rewrites = HashMap::new();
+		rewrites.insert("($X) => $X".to_string(), "identity".to_string());
+
+		let result = ast_edit_blocking(
+			task::CancelToken::default(),
+			&filesystem,
+			Some(rewrites),
+			None,
+			Some("mem://root/src".to_string()),
+			None,
+			None,
+			None,
+			Some(false),
+			None,
+			None,
+			None,
+		)
+		.expect("URL tree should rewrite through the provider");
+
+		let paths: Vec<_> = result
+			.file_changes
+			.iter()
+			.map(|change| change.path.as_str())
+			.collect();
+		assert_eq!(paths, ["a.ts", "nested/b.ts"]);
+		assert_eq!(result.total_replacements, 2);
+		assert_eq!(mem.contents("mem://root/src/a.ts").as_deref(), Some("const f = identity;\n"));
+		assert_eq!(
+			mem.contents("mem://root/src/nested/b.ts").as_deref(),
+			Some("const g = identity;\n")
+		);
+		assert_eq!(
+			mem.contents("mem://root/other.ts").as_deref(),
+			Some("const h = (z) => z;\n"),
+			"files outside the URL root stay untouched",
+		);
+	}
+
+	#[test]
+	fn single_file_url_root_displays_its_decoded_name() {
+		let (_mem, filesystem) =
+			crate::testing::MemFs::with_files(&[("mem://root/a%20b.ts", "const a = 1;\n")]);
+		let candidates = collect_candidates(
+			&filesystem,
+			Some("mem://root/a%20b.ts".to_string()),
+			None,
+			&task::CancelToken::default(),
+		)
+		.expect("single URL file is a candidate");
+		assert_eq!(candidates.len(), 1);
+		assert_eq!(candidates[0].display_path, "a b.ts");
+		assert_eq!(candidates[0].absolute_path, Path::new("mem://root/a%20b.ts"));
 	}
 }

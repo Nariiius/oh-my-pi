@@ -175,7 +175,7 @@ describe("InputController orphaned submit", () => {
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!model) throw new Error("Expected built-in anthropic model to exist");
 			authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-			authStorage.setRuntimeApiKey("anthropic", "test-key");
+			authStorage.keys.setRuntime("anthropic", "test-key");
 			const agent = new Agent({
 				initialState: {
 					model,
@@ -276,7 +276,7 @@ describe("InputController orphaned submit", () => {
 			const sessionManager = SessionManager.inMemory(tempDir.path());
 			const settings = Settings.isolated({
 				"compaction.enabled": false,
-				"providers.tinyModel": "online",
+				modelRoles: { tiny: `${model.provider}/${model.id}` },
 			});
 			const localHandler = vi.fn(async () => {});
 			const runtime = new ExtensionRuntime();
@@ -316,6 +316,9 @@ describe("InputController orphaned submit", () => {
 				modelRegistry,
 				extensionRunner,
 			});
+			// A TITLE_SYSTEM.md override keeps automatic titles on the title model, so
+			// they start at submit instead of at a reply fork the mocked prompt never makes.
+			session.setTitleSystemPrompt("Name the session in 3-6 words.");
 			const titleSpy = vi.spyOn(session, "generateTitle").mockResolvedValue(null);
 			const { ctx, editor } = createContext(session);
 			ctx.sessionManager = sessionManager;

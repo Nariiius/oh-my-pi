@@ -3,12 +3,12 @@
 use std::{
 	collections::{BTreeSet, HashMap},
 	path::{Path, PathBuf},
-	sync::Arc,
+	sync::{Arc, LazyLock},
 };
 
 use parking_lot::Mutex;
 use regex::Regex;
-use xxhash_rust::{xxh32::xxh32, xxh64::xxh64};
+use xxhash_rust::{xxh32::Xxh32, xxh64::xxh64};
 
 /// Retained path count before LRU eviction.
 pub const DEFAULT_MAX_PATHS: usize = 256;
@@ -30,8 +30,10 @@ pub struct Snapshot {
 	pub text:       Arc<str>,
 	/// Four-character content tag.
 	pub hash:       String,
-	/// Lines displayed from this version, when provenance was recorded.
-	pub seen_lines: Option<BTreeSet<u32>>,
+	/// Lines displayed from this version, when provenance was recorded. Shared
+	/// so lookups hand out snapshots without copying a set that holds one entry
+	/// per displayed line.
+	pub seen_lines: Option<Arc<BTreeSet<u32>>>,
 }
 
 /// Clipboard registers threaded through one patch application.
@@ -67,16 +69,26 @@ impl Clipboard {
 }
 
 /// Compute the four-hex uppercase hashline content tag.
+///
+/// Hashes the text with trailing spaces, tabs, and CRs stripped from every
+/// line. Unchanged runs between stripped spans are fed straight from `text`, so
+/// no normalized copy is built.
 pub fn file_hash(text: &str) -> String {
-	let mut normalized = String::with_capacity(text.len());
+	let bytes = text.as_bytes();
+	let mut hasher = Xxh32::new(0);
+	let mut run_start = 0;
+	let mut line_start = 0;
 	for segment in text.split_inclusive('\n') {
-		let (line, newline) = segment
-			.strip_suffix('\n')
-			.map_or((segment, ""), |line| (line, "\n"));
-		normalized.push_str(line.trim_end_matches([' ', '\t', '\r']));
-		normalized.push_str(newline);
+		let line = segment.strip_suffix('\n').unwrap_or(segment);
+		let kept = line.trim_end_matches([' ', '\t', '\r']).len();
+		if kept < line.len() {
+			hasher.update(&bytes[run_start..line_start + kept]);
+			run_start = line_start + line.len();
+		}
+		line_start += segment.len();
 	}
-	format!("{:04X}", xxh32(normalized.as_bytes(), 0) & 0xffff)
+	hasher.update(&bytes[run_start..]);
+	format!("{:04X}", hasher.digest() & 0xffff)
 }
 
 /// Compute a stable 64-bit key for raw patch input.
@@ -84,12 +96,14 @@ pub fn payload_hash(text: &str) -> u64 {
 	xxh64(text.as_bytes(), 0)
 }
 
+static SEEN_LINE_PREFIX_RE: LazyLock<Regex> =
+	LazyLock::new(|| Regex::new(r"^[ *]?(\d+)(?:-(\d+))?:").expect("valid hashline prefix regex"));
+
 /// Parse displayed boundary line numbers from a hashline-formatted body.
 pub fn seen_lines_from_body(body: &str) -> Vec<u32> {
-	let prefix = Regex::new(r"^[ *]?(\d+)(?:-(\d+))?:").expect("valid hashline prefix regex");
 	let mut seen = Vec::new();
 	for row in body.split('\n') {
-		let Some(captures) = prefix.captures(row) else {
+		let Some(captures) = SEEN_LINE_PREFIX_RE.captures(row) else {
 			continue;
 		};
 		if let Ok(line) = captures[1].parse() {
@@ -105,9 +119,24 @@ pub fn seen_lines_from_body(body: &str) -> Vec<u32> {
 	seen
 }
 
+struct StoredSnapshot {
+	snapshot: Snapshot,
+	units:    usize,
+}
+
 struct PathHistory {
-	versions: Vec<Snapshot>,
+	versions: Vec<StoredSnapshot>,
 	touched:  u64,
+}
+
+impl PathHistory {
+	fn retained_units(&self) -> usize {
+		1 + self
+			.versions
+			.iter()
+			.map(|version| version.units)
+			.sum::<usize>()
+	}
 }
 
 struct StoreState {
@@ -118,6 +147,7 @@ struct StoreState {
 	max_paths:       usize,
 	max_versions:    usize,
 	max_total_units: usize,
+	retained_units:  usize,
 }
 
 impl Default for StoreState {
@@ -130,6 +160,7 @@ impl Default for StoreState {
 			max_paths:       DEFAULT_MAX_PATHS,
 			max_versions:    DEFAULT_MAX_VERSIONS_PER_PATH,
 			max_total_units: DEFAULT_MAX_TOTAL_BYTES,
+			retained_units:  0,
 		}
 	}
 }
@@ -155,22 +186,26 @@ impl EditStore {
 	/// Record normalized text under a canonical path and return its tag.
 	pub fn record(&self, path: &Path, text: &str, seen_lines: Option<&[u32]>) -> String {
 		let hash = file_hash(text);
+		// Counted before locking: preview threads share this mutex.
+		let units = text.encode_utf16().count();
 		let mut state = self.inner.lock();
 		state.clock = state.clock.wrapping_add(1);
 		let touched = state.clock;
 		let max_versions = state.max_versions;
+		let mut previous_units = 0;
 		let history = state
 			.histories
 			.entry(path.to_owned())
+			.and_modify(|history| previous_units = history.retained_units())
 			.or_insert_with(|| PathHistory { versions: Vec::new(), touched });
 		history.touched = touched;
 		if let Some(index) = history
 			.versions
 			.iter()
-			.position(|version| version.hash == hash && &*version.text == text)
+			.position(|version| version.snapshot.hash == hash && &*version.snapshot.text == text)
 		{
 			let mut snapshot = history.versions.remove(index);
-			merge_seen(&mut snapshot, seen_lines);
+			merge_seen(&mut snapshot.snapshot, seen_lines);
 			history.versions.insert(0, snapshot);
 		} else if max_versions > 0 {
 			let mut snapshot = Snapshot {
@@ -180,9 +215,13 @@ impl EditStore {
 				seen_lines: None,
 			};
 			merge_seen(&mut snapshot, seen_lines);
-			history.versions.insert(0, snapshot);
+			history
+				.versions
+				.insert(0, StoredSnapshot { snapshot, units });
 			history.versions.truncate(max_versions);
 		}
+		let current_units = history.retained_units();
+		state.retained_units = state.retained_units - previous_units + current_units;
 		evict(&mut state);
 		hash
 	}
@@ -209,9 +248,9 @@ impl EditStore {
 		if let Some(version) = state
 			.histories
 			.get_mut(path)
-			.and_then(|h| h.versions.iter_mut().find(|v| v.hash == hash))
+			.and_then(|h| h.versions.iter_mut().find(|v| v.snapshot.hash == hash))
 		{
-			merge_seen(version, Some(lines));
+			merge_seen(&mut version.snapshot, Some(lines));
 		}
 	}
 
@@ -219,7 +258,37 @@ impl EditStore {
 	pub fn head(&self, path: &Path) -> Option<Snapshot> {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
-		state.histories.get(path)?.versions.first().cloned()
+		state
+			.histories
+			.get(path)?
+			.versions
+			.first()
+			.map(|v| v.snapshot.clone())
+	}
+
+	/// Return the current version's tag and refresh path recency.
+	pub fn head_hash(&self, path: &Path) -> Option<String> {
+		let mut state = self.inner.lock();
+		touch(&mut state, path);
+		state
+			.histories
+			.get(path)?
+			.versions
+			.first()
+			.map(|v| v.snapshot.hash.clone())
+	}
+
+	/// Every retained snapshot for a path, newest first.
+	pub fn versions(&self, path: &Path) -> Vec<Snapshot> {
+		let mut state = self.inner.lock();
+		touch(&mut state, path);
+		state.histories.get(path).map_or_else(Vec::new, |history| {
+			history
+				.versions
+				.iter()
+				.map(|version| version.snapshot.clone())
+				.collect()
+		})
 	}
 
 	/// Return the most recent version matching a tag and refresh path recency.
@@ -231,8 +300,19 @@ impl EditStore {
 			.get(path)?
 			.versions
 			.iter()
-			.find(|v| v.hash == hash)
-			.cloned()
+			.find(|v| v.snapshot.hash == hash)
+			.map(|v| v.snapshot.clone())
+	}
+
+	/// Whether a version matching a tag is retained; refreshes path recency
+	/// like [`Self::by_hash`].
+	pub fn has_hash(&self, path: &Path, hash: &str) -> bool {
+		let mut state = self.inner.lock();
+		touch(&mut state, path);
+		state
+			.histories
+			.get(path)
+			.is_some_and(|history| history.versions.iter().any(|v| v.snapshot.hash == hash))
 	}
 
 	/// Return the version with exactly equal text and refresh path recency.
@@ -244,25 +324,28 @@ impl EditStore {
 			.get(path)?
 			.versions
 			.iter()
-			.find(|v| &*v.text == text)
-			.cloned()
+			.find(|v| &*v.snapshot.text == text)
+			.map(|v| v.snapshot.clone())
 	}
 
-	/// Return every retained version matching a tag.
-	pub fn find_by_hash(&self, hash: &str) -> Vec<Snapshot> {
+	/// Path of every retained version matching a tag (one entry per version).
+	pub fn paths_with_hash(&self, hash: &str) -> Vec<PathBuf> {
 		let state = self.inner.lock();
 		state
 			.histories
 			.values()
 			.flat_map(|h| h.versions.iter())
-			.filter(|v| v.hash == hash)
-			.cloned()
+			.filter(|v| v.snapshot.hash == hash)
+			.map(|v| v.snapshot.path.clone())
 			.collect()
 	}
 
 	/// Remove one path's history.
 	pub fn invalidate(&self, path: &Path) {
-		self.inner.lock().histories.remove(path);
+		let mut state = self.inner.lock();
+		if let Some(history) = state.histories.remove(path) {
+			state.retained_units -= history.retained_units();
+		}
 	}
 
 	/// Move source history and provenance to a destination path.
@@ -274,19 +357,21 @@ impl EditStore {
 		let Some(mut source) = state.histories.remove(from) else {
 			return;
 		};
+		state.retained_units -= source.retained_units();
 		for version in &mut source.versions {
-			to.clone_into(&mut version.path);
+			to.clone_into(&mut version.snapshot.path);
 		}
 		let mut merged = source.versions;
 		if let Some(destination) = state.histories.remove(to) {
+			state.retained_units -= destination.retained_units();
 			merged.extend(destination.versions);
 		}
 		let mut hashes = BTreeSet::new();
-		merged.retain(|version| hashes.insert(version.hash.clone()));
+		merged.retain(|version| hashes.insert(version.snapshot.hash.clone()));
 		merged.truncate(max_versions);
-		state
-			.histories
-			.insert(to.to_owned(), PathHistory { versions: merged, touched });
+		let history = PathHistory { versions: merged, touched };
+		state.retained_units += history.retained_units();
+		state.histories.insert(to.to_owned(), history);
 		evict(&mut state);
 	}
 
@@ -326,9 +411,8 @@ impl EditStore {
 
 fn merge_seen(snapshot: &mut Snapshot, lines: Option<&[u32]>) {
 	let Some(lines) = lines else { return };
-	snapshot
-		.seen_lines
-		.get_or_insert_with(BTreeSet::new)
+	// Copies the set only while a lookup still holds the previous version.
+	Arc::make_mut(snapshot.seen_lines.get_or_insert_with(Arc::default))
 		.extend(lines.iter().copied());
 }
 
@@ -343,22 +427,8 @@ fn touch(state: &mut StoreState, path: &Path) {
 	}
 }
 
-fn retained_units(state: &StoreState) -> usize {
-	state
-		.histories
-		.values()
-		.map(|history| {
-			1 + history
-				.versions
-				.iter()
-				.map(|v| v.text.encode_utf16().count())
-				.sum::<usize>()
-		})
-		.sum()
-}
-
 fn evict(state: &mut StoreState) {
-	while state.histories.len() > state.max_paths || retained_units(state) > state.max_total_units {
+	while state.histories.len() > state.max_paths || state.retained_units > state.max_total_units {
 		let Some(oldest) = state
 			.histories
 			.iter()
@@ -367,7 +437,9 @@ fn evict(state: &mut StoreState) {
 		else {
 			break;
 		};
-		state.histories.remove(&oldest);
+		if let Some(history) = state.histories.remove(&oldest) {
+			state.retained_units -= history.retained_units();
+		}
 	}
 }
 
@@ -382,6 +454,46 @@ mod tests {
 		assert_eq!(file_hash(""), "5D05");
 	}
 
+	/// Hashes a normalized copy — the reference `file_hash` must stay
+	/// bit-identical to.
+	fn file_hash_of_normalized_copy(text: &str) -> String {
+		let mut normalized = String::with_capacity(text.len());
+		for segment in text.split_inclusive('\n') {
+			let (line, newline) = segment
+				.strip_suffix('\n')
+				.map_or((segment, ""), |line| (line, "\n"));
+			normalized.push_str(line.trim_end_matches([' ', '\t', '\r']));
+			normalized.push_str(newline);
+		}
+		format!("{:04X}", xxhash_rust::xxh32::xxh32(normalized.as_bytes(), 0) & 0xffff)
+	}
+
+	#[test]
+	fn file_hash_streams_the_normalized_text() {
+		let long_line = "x".repeat(100);
+		let cases = [
+			String::new(),
+			"\n".to_owned(),
+			"\r\n".to_owned(),
+			" \t\r".to_owned(),
+			"no final newline".to_owned(),
+			"no final newline with trailing space \t".to_owned(),
+			"crlf\r\nlines\r\nend\r\n".to_owned(),
+			"crlf without final\r\nnewline\r".to_owned(),
+			"trailing  \nwhitespace\t\t\n  only indent kept\n   \n\t\n".to_owned(),
+			"lone\rcarriage\r\rreturns \r\r\n".to_owned(),
+			"mixed 😀 \t\r\nünïcödé  \n中文\r".to_owned(),
+			format!("{long_line} \n{long_line}\r\n{long_line}\n{long_line}\t"),
+			(0..200)
+				.map(|n| format!("line {n}{}", ["", " ", "\t", "\r", " \r"][n % 5]))
+				.collect::<Vec<_>>()
+				.join("\n"),
+		];
+		for text in &cases {
+			assert_eq!(file_hash(text), file_hash_of_normalized_copy(text), "{text:?}");
+		}
+	}
+
 	#[test]
 	fn snapshots_deduplicate_promote_and_union_seen_lines() {
 		let store = EditStore::new();
@@ -392,7 +504,21 @@ mod tests {
 		assert_eq!(store.record(path, "one", Some(&[3])), first);
 		let head = store.head(path).unwrap();
 		assert_eq!(&*head.text, "one");
-		assert_eq!(head.seen_lines.unwrap(), BTreeSet::from([1, 3]));
+		assert_eq!(*head.seen_lines.unwrap(), BTreeSet::from([1, 3]));
+	}
+
+	#[test]
+	fn versions_lists_newest_first() {
+		let store = EditStore::new();
+		let path = Path::new("a.ts");
+		store.record(path, "one", Some(&[1]));
+		store.record(path, "two", Some(&[2]));
+		let texts: Vec<String> = store
+			.versions(path)
+			.iter()
+			.map(|snapshot| snapshot.text.to_string())
+			.collect();
+		assert_eq!(texts, ["two", "one"]);
 	}
 
 	#[test]
@@ -425,6 +551,77 @@ mod tests {
 		store.relocate(Path::new("from"), Path::new("to"));
 		assert!(store.head(Path::new("from")).is_none());
 		assert_eq!(store.by_hash(Path::new("to"), &shared).unwrap().path, Path::new("to"));
+	}
+
+	#[test]
+	fn unicode_budget_survives_promotion_and_version_truncation() {
+		let store = EditStore::with_limits(10, 2, 8);
+		let a = Path::new("a");
+		let b = Path::new("b");
+		store.record(a, "😀", None);
+		store.record(a, "é", None); // a: 1 + 2 + 1 units
+		store.record(b, "abc", None); // exactly 8 units
+		store.record(a, "😀", None); // promotion does not add units
+		store.record(a, "x", None); // replaces é, still exactly 8 units
+		assert!(store.by_content(a, "é").is_none());
+		assert!(store.by_content(a, "😀").is_some());
+		assert!(store.head(b).is_some());
+		store.record_seen_lines(a, &file_hash("x"), &[1]);
+		store.record(Path::new("c"), "", None); // evicts b, not the touched a
+		assert!(store.head(b).is_none());
+		assert_eq!(&*store.head(a).unwrap().text, "x");
+		assert!(store.head(Path::new("c")).is_some());
+	}
+
+	#[test]
+	fn invalidation_and_eviction_release_their_budget() {
+		let store = EditStore::with_limits(10, 2, 5);
+		store.record(Path::new("old"), "😀", None); // 3 units
+		store.record(Path::new("next"), "éé", None); // evicts old
+		assert!(store.head(Path::new("old")).is_none());
+		store.record(Path::new("last"), "x", None); // exactly 5 units
+		assert!(store.head(Path::new("next")).is_some());
+		assert!(store.head(Path::new("last")).is_some());
+		store.invalidate(Path::new("next"));
+		store.invalidate(Path::new("next")); // absent history releases nothing
+		store.record(Path::new("replacement"), "😀", None);
+		assert!(store.head(Path::new("last")).is_some());
+		assert!(store.head(Path::new("replacement")).is_some());
+	}
+
+	#[test]
+	fn relocation_releases_duplicate_and_truncated_versions() {
+		let store = EditStore::with_limits(10, 2, 15);
+		let from = Path::new("from");
+		let to = Path::new("to");
+		store.record(from, "😀", None);
+		store.record(from, "é", None); // 4 units
+		store.record(to, "😀", None);
+		store.record(to, "abc", None); // 6 units
+		store.record(Path::new("other"), "wxyz", None); // exactly 15 units
+		store.relocate(from, to); // duplicate 😀 and truncated abc release 6 units
+		store.relocate(to, to); // self-relocation preserves the budget
+		store.relocate(Path::new("missing"), to);
+		store.record(Path::new("filler"), "12345", None); // exactly 15 units again
+		assert!(store.head(from).is_none());
+		assert!(store.by_content(to, "abc").is_none());
+		assert_eq!(store.by_content(to, "😀").unwrap().path, to);
+		assert_eq!(&*store.head(to).unwrap().text, "é");
+		assert!(store.head(Path::new("other")).is_some());
+		assert!(store.head(Path::new("filler")).is_some());
+	}
+
+	#[test]
+	fn zero_limits_reject_snapshots_and_clear_restores_default_limits() {
+		for (max_paths, max_versions, max_units) in [(0, 2, 10), (10, 0, 1), (10, 2, 0)] {
+			let store = EditStore::with_limits(max_paths, max_versions, max_units);
+			store.record(Path::new("empty"), "", None);
+			assert!(store.head(Path::new("empty")).is_none());
+			store.relocate(Path::new("empty"), Path::new("moved"));
+			store.clear();
+			store.record(Path::new("after-clear"), "😀", None);
+			assert_eq!(&*store.head(Path::new("after-clear")).unwrap().text, "😀");
+		}
 	}
 
 	#[test]

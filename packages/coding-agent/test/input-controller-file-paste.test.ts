@@ -23,21 +23,25 @@ const TINY_PNG = Buffer.from(
 );
 
 function createContext() {
-	const insertFileAttachment = vi.fn<(path: string, expansion: string, size?: number) => void>();
+	const insertTextAttachment = vi.fn<(content: string, expansion?: string) => void>();
 	const editor = {
 		pendingImages: [] as Array<{ type: string; data: string; mimeType: string }>,
 		pendingImageLinks: [] as (string | undefined)[],
+		pasteText: vi.fn(),
 		imageLinks: undefined as (string | undefined)[] | undefined,
-		insertFileAttachment,
+		insertTextAttachment,
 	} as unknown as InteractiveModeContext["editor"];
 	const ctx = {
+		ui: { getFocused: () => null, requestRender: vi.fn() },
+		showStatus: vi.fn(),
 		editor,
 		sessionManager: {
+			putBlob: async () => ({ displayPath: "file:///blob/1.png" }),
 			putBlobSync: () => ({ displayPath: "file:///blob/1.png" }),
 		} as unknown as InteractiveModeContext["sessionManager"],
 	} as unknown as InteractiveModeContext;
 	const controller = new InputController(ctx);
-	return { controller, editor, insertFileAttachment };
+	return { controller, editor, insertTextAttachment };
 }
 
 afterEach(() => {
@@ -50,13 +54,13 @@ describe("InputController.handleFilePaste", () => {
 		const file = path.join(dir, "notes.ts");
 		await fs.writeFile(file, "const answer = 42;\n");
 
-		const { controller, insertFileAttachment } = createContext();
-		const replacement = controller.handleFilePaste(file);
+		const { controller, insertTextAttachment } = createContext();
+		const replacement = await controller.handleFilePaste(file);
 
 		expect(replacement).toBe("");
-		expect(insertFileAttachment).toHaveBeenCalledWith(file, `@${file}`, "const answer = 42;\n".length);
+		expect(insertTextAttachment).toHaveBeenCalledWith(file, `@${file}`);
 		// The staged expansion round-trips through the submit-time auto-read pipeline.
-		const mention = insertFileAttachment.mock.calls[0]![1];
+		const mention = insertTextAttachment.mock.calls[0]![1];
 		const mentions = extractFileMentions(`see ${mention} `);
 		expect(mentions).toEqual([file]);
 		const messages = await generateFileMentionMessages(mentions, dir);
@@ -74,12 +78,12 @@ describe("InputController.handleFilePaste", () => {
 		const file = path.join(dir, "my notes.md");
 		await fs.writeFile(file, "# embedded\n");
 
-		const { controller, insertFileAttachment } = createContext();
-		const replacement = controller.handleFilePaste(file);
+		const { controller, insertTextAttachment } = createContext();
+		const replacement = await controller.handleFilePaste(file);
 
 		expect(replacement).toBe("");
-		expect(insertFileAttachment).toHaveBeenCalledWith(file, `@"${file}"`, "# embedded\n".length);
-		const mention = insertFileAttachment.mock.calls[0]![1];
+		expect(insertTextAttachment).toHaveBeenCalledWith(file, `@"${file}"`);
+		const mention = insertTextAttachment.mock.calls[0]![1];
 		const mentions = extractFileMentions(`link ${mention} `);
 		expect(mentions).toEqual([file]);
 		const messages = await generateFileMentionMessages(mentions, dir);
@@ -90,16 +94,16 @@ describe("InputController.handleFilePaste", () => {
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	it("keeps raw text when the pasted path does not exist", () => {
-		const { controller, insertFileAttachment } = createContext();
-		expect(controller.handleFilePaste("/no/such/file-here.ts")).toBeUndefined();
-		expect(insertFileAttachment).not.toHaveBeenCalled();
+	it("keeps raw text when the pasted path does not exist", async () => {
+		const { controller, insertTextAttachment } = createContext();
+		expect(await controller.handleFilePaste("/no/such/file-here.ts")).toBeUndefined();
+		expect(insertTextAttachment).not.toHaveBeenCalled();
 	});
 
-	it("keeps raw text for empty or whitespace-only input", () => {
-		const { controller, insertFileAttachment } = createContext();
-		expect(controller.handleFilePaste("   ")).toBeUndefined();
-		expect(insertFileAttachment).not.toHaveBeenCalled();
+	it("keeps raw text for empty or whitespace-only input", async () => {
+		const { controller, insertTextAttachment } = createContext();
+		expect(await controller.handleFilePaste("   ")).toBeUndefined();
+		expect(insertTextAttachment).not.toHaveBeenCalled();
 	});
 
 	it("still stages image files as [Image #N] attachments", async () => {
@@ -107,14 +111,11 @@ describe("InputController.handleFilePaste", () => {
 		const file = path.join(dir, "pic.png");
 		await fs.writeFile(file, TINY_PNG);
 
-		const { controller, editor, insertFileAttachment } = createContext();
-		const replacement = controller.handleFilePaste(file);
+		const { controller, insertTextAttachment } = createContext();
+		const replacement = await controller.handleFilePaste(file);
 
-		expect(replacement).toBe("[Image #1] ");
-		expect(insertFileAttachment).not.toHaveBeenCalled();
-		expect(editor.pendingImages).toHaveLength(1);
-		expect((editor.pendingImages[0] as { mimeType: string }).mimeType).toBe("image/png");
-		expect(editor.pendingImageLinks).toEqual(["file:///blob/1.png"]);
+		expect(replacement).toBe("");
+		expect(insertTextAttachment).not.toHaveBeenCalled();
 
 		await fs.rm(dir, { recursive: true, force: true });
 	});

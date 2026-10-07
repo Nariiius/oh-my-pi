@@ -1,23 +1,31 @@
 import type { Agent, AgentMessage, AgentToolResult, AgentTurnEndContext } from "@oh-my-pi/pi-agent-core";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { resolveApprovedPlan } from "../plan-mode/approved-plan";
+import { autosaveApprovedPlan } from "../plan-mode/plan-autosave";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import type { PlanModeState } from "../plan-mode/state";
 import planYoloHandoffPrompt from "../prompts/system/plan-yolo-handoff.md" with { type: "text" };
 import prewalkChecklistPrompt from "../prompts/system/prewalk-checklist.md" with { type: "text" };
 import prewalkContinuePrompt from "../prompts/system/prewalk-continue.md" with { type: "text" };
 import prewalkPlanPrompt from "../prompts/system/prewalk-plan.md" with { type: "text" };
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "../thinking";
+import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "@oh-my-pi/pi-tui/thinking";
 import { isMCPToolName } from "../tools/builtin-names";
+import {
+	replaceTabs,
+	shortenEmbeddedPaths,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "@oh-my-pi/pi-tui/render/render-utils";
 import type { PlanProposalHandler } from "../tools/resolve";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { PlanYolo, Prewalk } from "./agent-session-types";
 import { PREWALK_PLAN_MESSAGE_TYPE } from "./messages";
 import type { SessionManager } from "./session-manager";
-
 const PREWALK_CONTINUE_MESSAGE_TYPE = "prewalk-continue";
 const PREWALK_CHECKLIST_MESSAGE_TYPE = "prewalk-checklist";
 
@@ -57,8 +65,11 @@ function isPrewalkImplementationAction(result: ToolResultMessage): boolean {
 export interface PrewalkCoordinatorHost {
 	agent: Agent;
 	sessionManager: SessionManager;
+	settings: Settings;
 	model(): Model | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
+	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
+	resolveDefaultPrewalk(): Prewalk | undefined;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	setModelTemporary(
 		model: Model,
@@ -86,6 +97,8 @@ export interface PrewalkCoordinatorOptions {
 }
 
 /** Coordinates one-way model prewalks and automatic plan-yolo handoffs. */
+
+export type PrewalkRestartResult = "armed" | "reset" | "rejected";
 export class PrewalkCoordinator {
 	readonly #host: PrewalkCoordinatorHost;
 	#prewalk: Prewalk | undefined;
@@ -95,6 +108,14 @@ export class PrewalkCoordinator {
 	#planYolo: PlanYolo | undefined;
 	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[] } | undefined;
 	#planYoloArmed = false;
+	#handoff:
+		| {
+				source: Model;
+				sourceThinkingLevel: ConfiguredThinkingLevel | undefined;
+				target: Model;
+				targetThinkingLevel: ConfiguredThinkingLevel | undefined;
+		  }
+		| undefined;
 
 	constructor(host: PrewalkCoordinatorHost, options: PrewalkCoordinatorOptions = {}) {
 		this.#host = host;
@@ -127,6 +148,51 @@ export class PrewalkCoordinator {
 		this.#planInjected = false;
 		this.#continuePending = false;
 		this.#todoSeen = false;
+	}
+
+	/** A later model/effort selection owns the active model, even if its identity is unchanged. */
+	releaseHandoff(): void {
+		this.#handoff = undefined;
+	}
+
+	/** Retire the outgoing cycle and prepare a configured prewalk for a fresh main session. */
+	async resetForNewSession(enabled: boolean): Promise<void> {
+		const handoff = this.#handoff;
+		const current = this.#host.model();
+		const restoreSource =
+			enabled &&
+			handoff !== undefined &&
+			current?.provider === handoff.target.provider &&
+			current?.id === handoff.target.id &&
+			this.#host.configuredThinkingLevel() === handoff.targetThinkingLevel;
+		this.#scrubPlanNudge(undefined, true);
+		this.#clearPrewalkState();
+		this.releaseHandoff();
+		if (!enabled) return;
+		if (restoreSource && handoff) {
+			// Best-effort: /new has already committed the transcript switch, so an
+			// unusable planning model must not abort the rest of session setup.
+			try {
+				await this.#host.setModelTemporary(handoff.source, handoff.sourceThinkingLevel, { ephemeral: true });
+				// Temporary selection treats undefined as "keep/default"; restoration must preserve
+				// the original selector, including auto or an explicitly inherited effort.
+				this.#host.restoreThinkingLevel(handoff.sourceThinkingLevel);
+			} catch (error) {
+				this.#host.emitNotice(
+					"warning",
+					`Prewalk: could not restore ${handoff.source.provider}/${handoff.source.id}: ${error instanceof Error ? error.message : String(error)}`,
+					"prewalk",
+				);
+			}
+		}
+		const prewalk = this.#host.resolveDefaultPrewalk();
+		if (!prewalk) return;
+		if (this.#isNoop(prewalk)) {
+			this.#disarmNoop(prewalk);
+			return;
+		}
+		// Like startup, inject guidance at the first completed turn, not into an empty transcript.
+		this.#prewalk = prewalk;
 	}
 
 	#disarmNoop(prewalk: Prewalk): void {
@@ -195,8 +261,18 @@ export class PrewalkCoordinator {
 			this.#disarmNoop(prewalk);
 			return;
 		}
+		const source = this.#host.model();
+		const sourceThinkingLevel = this.#host.configuredThinkingLevel();
 		await this.#host.setModelTemporary(target, prewalk.thinkingLevel, { ephemeral: true });
 		this.#clearPrewalkState();
+		if (source) {
+			this.#handoff = {
+				source,
+				sourceThinkingLevel,
+				target,
+				targetThinkingLevel: this.#host.configuredThinkingLevel(),
+			};
+		}
 		this.#host.emitNotice(
 			"info",
 			`Prewalk: switched to ${target.provider}/${target.id} after first ${action.toolName} call.`,
@@ -210,6 +286,19 @@ export class PrewalkCoordinator {
 			display: false,
 			timestamp: Date.now(),
 		});
+	}
+
+	/** Drops a pending prewalk hand-off (e.g. `prewalk.enabled` turned off); no-op when none is armed. */
+	disarm(): void {
+		const active = this.#prewalk;
+		if (!active) return;
+		this.#scrubPlanNudge(undefined, true);
+		this.#clearPrewalkState();
+		this.#host.emitNotice(
+			"info",
+			`Prewalk: disarmed; staying on the active model instead of switching to ${active.target.provider}/${active.target.id}.`,
+			"prewalk",
+		);
 	}
 
 	/** Arms a prewalk immediately for an explicit slash-command request. */
@@ -252,6 +341,37 @@ export class PrewalkCoordinator {
 		return true;
 	}
 
+	/**
+	 * Restores the planning model and reuses or creates the requested one-shot handoff.
+	 * A different active arm rejects the restart before the current model changes.
+	 */
+	async restart(
+		source: Model,
+		sourceThinkingLevel: ConfiguredThinkingLevel | undefined,
+		target: Model,
+		targetThinkingLevel: ConfiguredThinkingLevel | undefined,
+	): Promise<PrewalkRestartResult> {
+		const active = this.#prewalk;
+		if (
+			active &&
+			(active.target.provider !== target.provider ||
+				active.target.id !== target.id ||
+				active.thinkingLevel !== targetThinkingLevel)
+		) {
+			this.arm(target, targetThinkingLevel);
+			return "rejected";
+		}
+
+		await this.#host.setModelTemporary(source, sourceThinkingLevel, { ephemeral: true });
+		if (!active) return this.arm(target, targetThinkingLevel) ? "armed" : "reset";
+		if (this.#isNoop(active)) {
+			this.#scrubPlanNudge();
+			this.#disarmNoop(active);
+			return "reset";
+		}
+		return "armed";
+	}
+
 	/** Lazily enables plan-yolo's plan phase before the first prompt is built. */
 	async armPlanYoloIfNeeded(): Promise<void> {
 		if (!this.#planYolo || this.#planYoloArmed) return;
@@ -283,24 +403,39 @@ export class PrewalkCoordinator {
 		this.#host.setPlanProposalHandler(title => this.#finalizePlanYoloProposal(title));
 	}
 
-	#scrubPlanNudge(liveMessages: AgentMessage[]): void {
-		if (!this.#planInjected) return;
-		const isPlanNudge = isPrewalkPlanNudge;
-		for (let index = liveMessages.length - 1; index >= 0; index--) {
-			if (!isPlanNudge(liveMessages[index])) continue;
-			invalidateMessageCache(liveMessages[index]);
-			liveMessages.splice(index, 1);
+	#scrubPlanNudge(liveMessages?: AgentMessage[], includeContinuation = false): void {
+		if (liveMessages) {
+			for (let index = liveMessages.length - 1; index >= 0; index--) {
+				if (!isPrewalkPlanNudge(liveMessages[index])) continue;
+				invalidateMessageCache(liveMessages[index]);
+				liveMessages.splice(index, 1);
+			}
 		}
 		const stateMessages = this.#host.agent.state.messages;
-		const filtered = stateMessages.filter(message => !isPlanNudge(message));
+		const filtered = stateMessages.filter(message => !isPrewalkPlanNudge(message));
 		if (filtered.length !== stateMessages.length) this.#host.agent.replaceMessages(filtered);
+		// Delivered continuations are persisted history; only pending ones can be canceled.
+		const isPendingNudge = (message: AgentMessage): boolean =>
+			isPrewalkPlanNudge(message) ||
+			(includeContinuation && message.role === "custom" && message.customType === PREWALK_CONTINUE_MESSAGE_TYPE);
+		const steering = this.#host.agent.peekSteeringQueue();
+		if (steering.some(isPendingNudge)) {
+			this.#host.agent.replaceQueue(
+				"steering",
+				steering.filter(message => !isPendingNudge(message)),
+			);
+		}
 	}
 
 	async #finalizePlanYoloProposal(title: string): Promise<AgentToolResult<unknown>> {
 		const planYolo = this.#planYolo;
 		const state = this.#host.getPlanModeState();
 		if (!planYolo || !state?.enabled) throw new ToolError("Plan mode is not active.");
-		const { planFilePath, title: resolvedTitle } = await resolveApprovedPlan({
+		const {
+			planFilePath,
+			planContent,
+			title: resolvedTitle,
+		} = await resolveApprovedPlan({
 			suppliedTitle: title,
 			statePlanFilePath: state.planFilePath,
 			readPlan: url =>
@@ -310,6 +445,34 @@ export class PrewalkCoordinator {
 				}),
 			listPlanFiles: () => listPlanFiles({ localProtocolOptions: this.#host.localProtocolOptions() }),
 		});
+		let autosavedPlan: string | null = null;
+		try {
+			autosavedPlan = await autosaveApprovedPlan({
+				settings: this.#host.settings,
+				cwd: this.#host.sessionManager.getCwd(),
+				title: resolvedTitle,
+				planContent,
+			});
+			if (autosavedPlan) {
+				const displayPath = truncateToWidth(replaceTabs(shortenPath(autosavedPlan)), TRUNCATE_LENGTHS.CONTENT);
+				this.#host.emitNotice("info", `Plan autosaved to ${displayPath}.`, "plan-yolo");
+			}
+		} catch (error) {
+			logger.warn("Failed to autosave approved plan", { error });
+			const detail = truncateToWidth(
+				shortenEmbeddedPaths(
+					replaceTabs(error instanceof Error ? error.message : String(error))
+						.replace(/[\r\n]+/g, " ")
+						.trim(),
+				),
+				TRUNCATE_LENGTHS.CONTENT,
+			);
+			this.#host.emitNotice(
+				"warning",
+				`Plan autosave failed: ${detail} Continuing with implementation.`,
+				"plan-yolo",
+			);
+		}
 		this.#host.setPlanModeState(undefined);
 		const previousPresentation = this.#planYoloPreviousNonMCPPresentation;
 		try {

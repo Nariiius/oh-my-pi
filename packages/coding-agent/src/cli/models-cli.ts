@@ -2,8 +2,8 @@
  * `omp models` — list, search, probe, and refresh available models.
  *
  * Subcommands:
- * - `ls` (default): list every available model grouped by provider.
- * - `find <substring>`: list models whose provider, id, or name contains the substring.
+ * - `ls` (default): list available chat models grouped by provider.
+ * - `find <substring>`: list models of the selected kind whose provider, id, or name contains the substring.
  * - `refresh`: force an online catalog re-fetch (ignoring the model cache TTL),
  *   then list. This is the supported replacement for `rm -rf ~/.omp/models.db`
  *   when a provider ships a new model that the 24h cache has not picked up yet.
@@ -17,16 +17,22 @@
  */
 import { type Api, completeSimple, type Effort, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
+import { canonicalizeProvider, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { canonicalizeProvider } from "@oh-my-pi/pi-catalog/models";
+import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import type { ConfigError } from "../config/config-file";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions";
 import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
 import { EventBus } from "../utils/event-bus";
+
+import { cfgDisabledExtensions, cfgExtensions } from "../extensibility/settings";
+import { cfgEnabledModels } from "../config/model-settings";
 
 export type ModelsAction = "ls" | "find" | "refresh" | "probe";
 
@@ -40,6 +46,8 @@ export interface ModelsCommandArgs {
 		apply?: boolean;
 		/** `probe`: per-model timeout in seconds (default 20). */
 		timeout?: number;
+		/** Catalog kind to list; defaults to chat models. */
+		kind?: ModelKind | "all";
 		/** CLI `-e <path>` extension paths to load before listing (issue #905). */
 		extensions?: string[];
 		/** Skip extension discovery; only load explicit `extensions`. */
@@ -76,6 +84,7 @@ export function resolveModelsArgs(
 
 interface ModelJson {
 	provider: string;
+	kind: ModelKind;
 	id: string;
 	selector: string;
 	name: string;
@@ -86,6 +95,7 @@ interface ModelJson {
 	thinking: readonly Effort[] | null;
 	input: ("text" | "image")[];
 	cost: Model<Api>["cost"];
+	pricingStatus: ModelPricingStatus;
 }
 
 interface ModelsJson {
@@ -144,6 +154,7 @@ export function filterModelsByPattern(models: Model<Api>[], pattern: string | un
 function toModelJson(model: Model<Api>): ModelJson {
 	return {
 		provider: model.provider,
+		kind: modelKind(model),
 		id: model.id,
 		selector: `${model.provider}/${model.id}`,
 		name: model.name,
@@ -153,6 +164,7 @@ function toModelJson(model: Model<Api>): ModelJson {
 		thinking: model.thinking ? getSupportedEfforts(model) : null,
 		input: model.input,
 		cost: model.cost,
+		pricingStatus: getModelPricingStatus(model),
 	};
 }
 
@@ -203,12 +215,52 @@ function boxTable(columns: BoxColumn[], rows: string[][]): string[] {
 	return lines;
 }
 
-/** `omp models ls`/`find`: provider-grouped listing (one box table per provider). */
-function renderProviderModels(modelRegistry: ModelRegistry, pattern: string | undefined, json: boolean): void {
-	const available = modelRegistry.getAvailable();
-	const filtered = filterModelsByPattern(available, pattern);
+/**
+ * The two registry reads the listing performs. Structural so the renderer can be
+ * exercised without booting a full {@link ModelRegistry}.
+ */
+export interface ModelsListingSource {
+	/** Return models available for the selected catalog kind, or every kind for `all`. */
+	getAvailable(kind?: ModelKind | "all"): Model<Api>[];
+	getError(): ConfigError | undefined;
+}
 
-	const configError = modelRegistry.getError();
+/**
+ * Render `omp models ls`/`find` as one box table per provider, selecting chat
+ * models by default or the caller-requested catalog kind.
+ */
+export function renderProviderModels(
+	source: ModelsListingSource,
+	action: ModelsAction,
+	pattern: string | undefined,
+	json: boolean,
+	kind: ModelKind | "all" = "chat",
+): void {
+	const available = source.getAvailable(kind);
+	const needle = pattern?.toLowerCase();
+	let filtered = available;
+
+	if (needle) {
+		let exactFound = false;
+		if (action !== "find") {
+			const exact = available.filter(m => m.provider.toLowerCase() === needle);
+			if (exact.length > 0) {
+				filtered = exact;
+				exactFound = true;
+			}
+		}
+		if (!exactFound) {
+			filtered = available.filter(
+				model =>
+					model.id.toLowerCase().includes(needle) ||
+					model.provider.toLowerCase().includes(needle) ||
+					`${model.provider}/${model.id}`.toLowerCase().includes(needle) ||
+					model.name.toLowerCase().includes(needle),
+			);
+		}
+	}
+
+	const configError = source.getError();
 
 	if (json) {
 		if (configError) {
@@ -255,7 +307,9 @@ function renderProviderModels(modelRegistry: ModelRegistry, pattern: string | un
 			formatLimit(model.contextWindow),
 			formatLimit(model.maxTokens),
 			model.thinking ? getSupportedEfforts(model).join(",") : model.reasoning ? "yes" : "-",
-			model.input.includes("image") ? "yes" : "no",
+			// Wire truth, not the declared `input`: the transport drops image parts for
+			// models the catalog marks text-only (`compat.stripImageInput`, #9697).
+			sendsImageInputOnWire(model) ? "yes" : "no",
 		]);
 		for (const line of boxTable(
 			[
@@ -284,6 +338,8 @@ export interface RunModelsListingOptions {
 	action?: ModelsAction;
 	pattern?: string;
 	json?: boolean;
+	/** Catalog kind to list; defaults to chat models. */
+	kind?: ModelKind | "all";
 	/** CLI-supplied extension paths (e.g. from `-e <path>`). */
 	additionalExtensionPaths?: string[];
 	/** Extension paths configured under `extensions:` in user settings. */
@@ -373,6 +429,7 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		action = "ls",
 		pattern,
 		json = false,
+		kind = "chat",
 		additionalExtensionPaths = [],
 		settingsExtensions = [],
 		disabledExtensionIds = [],
@@ -389,7 +446,10 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 	try {
 		// Discover runtime (extension) provider catalogs now that they are registered.
 		await modelRegistry.refreshRuntimeProviders(action === "refresh" ? "online" : "online-if-uncached");
-		renderProviderModels(modelRegistry, pattern, json);
+		for (const warning of modelRegistry.drainConfigWarnings()) {
+			process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+		}
+		renderProviderModels(modelRegistry, action, pattern, json, kind);
 	} finally {
 		await emitSessionShutdownEvent(extensionRunner);
 	}
@@ -627,7 +687,7 @@ export async function runModelsProbeCore(options: ModelsProbeCoreOptions): Promi
 	let applied = false;
 	const working = results.filter(result => result.ok);
 	if (apply && working.length > 0) {
-		const currentEnabled = new Set(settings.get("enabledModels") ?? []);
+		const currentEnabled = new Set(cfgEnabledModels.get(settings));
 		for (const result of results) {
 			if (result.ok) {
 				currentEnabled.add(result.selector);
@@ -636,7 +696,7 @@ export async function runModelsProbeCore(options: ModelsProbeCoreOptions): Promi
 			}
 		}
 		const merged = [...currentEnabled].sort((left, right) => left.localeCompare(right));
-		settings.set("enabledModels", merged);
+		cfgEnabledModels.set(settings, merged);
 		await settings.flush();
 		applied = true;
 	}
@@ -830,6 +890,7 @@ export async function runModelsProbe(options: RunModelsProbeOptions): Promise<vo
 export async function runModelsCommand(command: ModelsCommandArgs): Promise<void> {
 	const { action, pattern } = command;
 	const json = command.flags.json ?? false;
+	const kind = command.flags.kind ?? "chat";
 
 	if (action === "find" && (!pattern || pattern.trim().length === 0)) {
 		process.stderr.write("`omp models find` requires a search substring, e.g. `omp models find minimax`\n");
@@ -838,15 +899,18 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 	}
 
 	const cwd = getProjectDir();
-	const authStorage = await discoverAuthStorage();
+	const settings = await Settings.init({ cwd, configFiles: command.flags.config });
+	const authStorage = await discoverAuthStorage(undefined, { settings });
 	try {
-		const settings = await Settings.init({ cwd, configFiles: command.flags.config });
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		if (action === "refresh" && !json && process.stderr.isTTY) {
 			process.stderr.write("Refreshing models from all providers…\n");
 		}
-		await modelRegistry.refresh(action === "refresh" ? "online" : "online-if-uncached");
+		await modelRegistry.refresh(
+			action === "refresh" ? "online" : "online-if-uncached",
+			action === "refresh" ? { refreshCommandCredentials: true } : undefined,
+		);
 
 		if (action === "probe") {
 			await runModelsProbe({
@@ -858,8 +922,8 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 				apply: command.flags.apply ?? false,
 				timeoutSeconds: command.flags.timeout ?? 20,
 				additionalExtensionPaths: command.flags.extensions ?? [],
-				settingsExtensions: settings.get("extensions") ?? [],
-				disabledExtensionIds: settings.get("disabledExtensions") ?? [],
+				settingsExtensions: cfgExtensions.get(settings) ?? [],
+				disabledExtensionIds: cfgDisabledExtensions.get(settings) ?? [],
 				disableExtensionDiscovery: Boolean(command.flags.noExtensions),
 			});
 			return;
@@ -872,9 +936,10 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 			action,
 			pattern,
 			json,
+			kind,
 			additionalExtensionPaths: cliExtensionPaths,
-			settingsExtensions: settings.get("extensions") ?? [],
-			disabledExtensionIds: settings.get("disabledExtensions") ?? [],
+			settingsExtensions: cfgExtensions.get(settings),
+			disabledExtensionIds: cfgDisabledExtensions.get(settings),
 			disableExtensionDiscovery: Boolean(command.flags.noExtensions),
 		});
 	} finally {
@@ -929,7 +994,7 @@ export async function startBackgroundStartupModelProbe(
 	const available = registry.getAvailable();
 	if (available.length === 0) return;
 
-	const enabledPatterns = settings.get("enabledModels");
+	const enabledPatterns = cfgEnabledModels.get(settings);
 	let modelsToProbe = available;
 	if (enabledPatterns && enabledPatterns.length > 0) {
 		const matched = new Set<Model<Api>>();

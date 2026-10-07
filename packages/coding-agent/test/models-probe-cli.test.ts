@@ -16,6 +16,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/cli/models-cli";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { cfgEnabledModels } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -175,12 +176,12 @@ describe("runModelsProbe", () => {
 			expect(run.applied).toBe(true);
 			expect(run.applyRequested).toBe(true);
 			expect(started).toEqual(["prov-a/works", "prov-a/dead"]);
-			expect(settings.get("enabledModels")).toEqual(["prov-a/works"]);
+			expect(cfgEnabledModels.get(settings)).toEqual(["prov-a/works"]);
 		});
 
 		test("reports an empty run for a non-matching pattern without applying", async () => {
 			const settings = await Settings.loadIsolated({ cwd: slashDir, agentDir: slashDir });
-			settings.set("enabledModels", ["prov-a/old"]);
+			cfgEnabledModels.set(settings, ["prov-a/old"]);
 			await settings.flush();
 			const registry = fakeRegistry([makeModel("prov-a", "m1")]);
 			const probeModel: ProbeModelFn = async model => resultFor(model, true);
@@ -195,7 +196,7 @@ describe("runModelsProbe", () => {
 			expect(run.models).toHaveLength(0);
 			expect(run.applied).toBe(false);
 			expect(run.pattern).toBe("nope");
-			expect(settings.get("enabledModels")).toEqual(["prov-a/old"]);
+			expect(cfgEnabledModels.get(settings)).toEqual(["prov-a/old"]);
 		});
 	});
 
@@ -270,10 +271,10 @@ describe("runModelsProbe", () => {
 		expect(parsed.failed[0]!.error).toBe("400 bad model");
 		expect(parsed.applied).toBe(true);
 
-		expect(settings.get("enabledModels")).toEqual(["prov-a/works"]);
+		expect(cfgEnabledModels.get(settings)).toEqual(["prov-a/works"]);
 		// Persisted on disk: a fresh isolated instance reads it back.
 		const onDisk = await Settings.loadIsolated({ cwd: tempDir, agentDir: tempDir });
-		expect(onDisk.get("enabledModels")).toEqual(["prov-a/works"]);
+		expect(cfgEnabledModels.get(onDisk)).toEqual(["prov-a/works"]);
 	});
 
 	test("without --apply reports the summary and leaves enabledModels untouched", async () => {
@@ -299,12 +300,12 @@ describe("runModelsProbe", () => {
 		expect(output).toContain("FAIL prov-a/dead");
 		expect(output).toContain("1/2 models responded");
 		expect(output).toContain("--apply");
-		expect(settings.get("enabledModels")).toEqual([]);
+		expect(cfgEnabledModels.get(settings)).toEqual([]);
 	});
 
 	test("does not apply an empty working set", async () => {
 		const settings = await Settings.loadIsolated({ cwd: tempDir, agentDir: tempDir });
-		settings.set("enabledModels", ["prov-a/old"]);
+		cfgEnabledModels.set(settings, ["prov-a/old"]);
 		await settings.flush();
 		const registry = fakeRegistry([makeModel("prov-a", "dead")]);
 		const probeModel: ProbeModelFn = async model => resultFor(model, false, "error");
@@ -327,7 +328,7 @@ describe("runModelsProbe", () => {
 		const parsed = JSON.parse(chunks.join("")) as { applied: boolean; failed: unknown[] };
 		expect(parsed.applied).toBe(false);
 		expect(parsed.failed).toHaveLength(1);
-		expect(settings.get("enabledModels")).toEqual(["prov-a/old"]);
+		expect(cfgEnabledModels.get(settings)).toEqual(["prov-a/old"]);
 	});
 
 	test("reports an empty probe set when nothing matches", async () => {
@@ -362,7 +363,7 @@ describe("runModelsProbe", () => {
 	test("merges partial probe results with existing enabledModels without wiping unprobed models", async () => {
 		const settings = await Settings.loadIsolated({ cwd: tempDir, agentDir: tempDir });
 		// Existing enabled models: prov-b/existing, prov-a/old-working, prov-a/old-failing
-		settings.set("enabledModels", ["prov-a/old-failing", "prov-a/old-working", "prov-b/existing"]);
+		cfgEnabledModels.set(settings, ["prov-a/old-failing", "prov-a/old-working", "prov-b/existing"]);
 		await settings.flush();
 
 		// We probe only prov-a: old-working passes, old-failing fails, new-working passes
@@ -391,7 +392,7 @@ describe("runModelsProbe", () => {
 		}
 
 		// prov-b/existing should be preserved; prov-a/old-failing should be removed; new-working and old-working should be present
-		expect(settings.get("enabledModels")).toEqual(["prov-a/new-working", "prov-a/old-working", "prov-b/existing"]);
+		expect(cfgEnabledModels.get(settings)).toEqual(["prov-a/new-working", "prov-a/old-working", "prov-b/existing"]);
 	});
 
 	test("startBackgroundStartupModelProbe automatically probes when stale or never probed", async () => {

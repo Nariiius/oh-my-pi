@@ -8,7 +8,7 @@ import {
 	type ModelsProbePanelCallbacks,
 	ModelsProbePanelComponent,
 } from "@oh-my-pi/pi-coding-agent/modes/components/models-probe-panel";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { TUI } from "@oh-my-pi/pi-tui";
 

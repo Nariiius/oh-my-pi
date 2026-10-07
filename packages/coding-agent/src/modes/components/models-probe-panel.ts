@@ -13,9 +13,9 @@
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { type Component, matchesKey, parseSgrMouse, type TUI } from "@oh-my-pi/pi-tui";
 import { type ModelProbeResult, type ProbeModelFn, runModelProbes } from "../../cli/models-cli";
-import { clampSelection, renderScrollableList } from "./selector-helpers";
-import { theme } from "../theme/theme";
-import { bottomBorder, row, topBorder } from "./overlay-box";
+import { clampSelection, renderScrollableList } from "@oh-my-pi/pi-tui/chrome/selector-helpers";
+import { theme } from "@oh-my-pi/pi-tui/theme";
+import { bottomBorder, row, topBorder } from "@oh-my-pi/pi-tui/chrome/overlay-box";
 
 export interface ModelsProbePanelOptions {
 	/** The (pattern-filtered) models to probe, in display order. */

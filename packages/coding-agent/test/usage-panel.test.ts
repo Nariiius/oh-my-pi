@@ -7,7 +7,7 @@ import {
 	renderUsageProgressBar,
 	UsagePanelComponent,
 } from "@oh-my-pi/pi-coding-agent/modes/components/usage-panel";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 let testTheme: Awaited<ReturnType<typeof getThemeByName>>;
