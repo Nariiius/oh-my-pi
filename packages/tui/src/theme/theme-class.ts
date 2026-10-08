@@ -625,6 +625,7 @@ export class Theme {
 			host: this.#symbols["icon.host"],
 			session: this.#symbols["icon.session"],
 			package: this.#symbols["icon.package"],
+			user: this.#symbols["icon.user"],
 			warning: this.#symbols["icon.warning"],
 			rewind: this.#symbols["icon.rewind"],
 			auto: this.#symbols["icon.auto"],

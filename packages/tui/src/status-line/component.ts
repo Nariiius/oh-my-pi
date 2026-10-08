@@ -3773,6 +3773,19 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return lines;
 	}
 
+	/** Compact format for account email: user (first 3 + last 3 if long) + @ + domain prefix. */
+	#formatCompactAccountEmail(email: string): string {
+		const atIndex = email.indexOf("@");
+		if (atIndex === -1) {
+			return email.length > 8 ? `${email.slice(0, 4)}..${email.slice(-2)}` : email;
+		}
+		const user = email.slice(0, atIndex);
+		const domain = email.slice(atIndex + 1);
+		const userShort = user.length > 6 ? `${user.slice(0, 3)}${user.slice(-3)}` : user;
+		const domainShort = domain.slice(0, 2);
+		return `${userShort}@${domainShort}`;
+	}
+
 	/** Pi-style two-line footer: path line, then cost/context left + model right. */
 	#buildFooterLines(width: number): string[] {
 		const lines: string[] = [];
@@ -3803,11 +3816,31 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 
 		// ── Line 2: Stats + context + model ────────────────────────
+		const model = this.session.state.model;
+		const provider = model?.provider;
+
+		const parts: string[] = [];
+		if (provider) {
+			const isGeminiOrOpenAi =
+				provider === "google-antigravity" ||
+				provider === "google" ||
+				provider === "gemini" ||
+				provider === "openai-codex" ||
+				provider === "openai";
+			if (isGeminiOrOpenAi) {
+				const activeIdentity = this.host.activeAccount(this.session, provider);
+				const email = activeIdentity?.email ?? activeIdentity?.accountId;
+				if (email) {
+					const userIcon = theme.icon.user ? `${theme.icon.user} ` : "";
+					parts.push(theme.fg("dim", `${userIcon}${this.#formatCompactAccountEmail(email)}`));
+				}
+			}
+		}
+
 		const stats = sm?.getUsageStatistics?.() ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 		const fmt = (n: number) =>
 			n < 1000 ? `${n}` : n < 10000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n / 1000)}k`;
 
-		const parts: string[] = [];
 		if (stats.cost)
 			parts.push(theme.fg("dim", `${theme.icon.cost ? `${theme.icon.cost} ` : ""}$${stats.cost.toFixed(3)}`));
 
@@ -3824,8 +3857,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const left = parts.join(" ");
 
 		// Model (right-aligned) — upstream model + thinking icons.
-		const model = this.session.state.model;
-		const provider = model?.provider;
 		const rawName = model?.name ?? model?.id ?? "Unknown";
 		const mn = provider && !rawName.startsWith(`${provider}/`) ? `${provider}/${rawName}` : rawName;
 		const modelIcon = theme.icon.model ? `${theme.icon.model} ` : "";
