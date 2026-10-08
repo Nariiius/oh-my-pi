@@ -2469,3 +2469,37 @@ function resolveStrictRef(root: Record<string, unknown>, ref: string): Record<st
 	}
 	return isJsonObject(cursor) ? cursor : undefined;
 }
+
+/**
+ * Ensure top-level OpenAI function parameters conform to the standard object
+ * schema structure expected by OpenAI-compatible endpoints:
+ * - `type: "object"`
+ * - `properties: Record<string, unknown>` (defaults to `{}`)
+ * - `required: string[]` (defaults to `[]`)
+ *
+ * Many OpenAI-compatible providers, proxies, and gateways (e.g. AgentRouter,
+ * DeepSeek API, LiteLLM, vLLM) validate `parameters` against an OpenAI function
+ * schema where omitted `required` or `properties` is deserialized as `null`,
+ * triggering schema validation 400s (`null is not of type "array"` or `null is not of type "object"`).
+ */
+export function normalizeOpenAIToolParameters(parameters: Record<string, unknown>): Record<string, unknown> {
+	if (!isJsonObject(parameters)) return { type: "object", properties: {}, required: [] };
+	const isObject =
+		parameters.type === "object" ||
+		(parameters.properties !== undefined && parameters.type === undefined) ||
+		parameters.type === undefined;
+	if (!isObject) return parameters;
+	const properties =
+		isJsonObject(parameters.properties) && !Array.isArray(parameters.properties)
+			? (parameters.properties as Record<string, unknown>)
+			: {};
+	const required = Array.isArray(parameters.required)
+		? parameters.required.filter((item): item is string => typeof item === "string")
+		: [];
+	return {
+		...parameters,
+		type: "object",
+		properties,
+		required,
+	};
+}

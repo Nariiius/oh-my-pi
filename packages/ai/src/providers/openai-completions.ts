@@ -53,6 +53,7 @@ import {
 	findStrictToolSchemaViolation,
 	flattenExclusiveRequiredRootUnion,
 	NO_STRICT,
+	normalizeOpenAIToolParameters,
 	normalizeSchemaForMoonshot,
 	sanitizeSchemaForGrammar,
 	toolWireSchema,
@@ -2844,7 +2845,8 @@ function convertTools(
 				: compat.toolSchemaFlavor === "grammar"
 					? sanitizeSchemaForGrammar(wireParameters)
 					: wireParameters;
-		const violation = findStrictToolSchemaViolation(emittedParameters, "#", { rejectRootObjectUnion });
+		const normalizedParameters = normalizeOpenAIToolParameters(emittedParameters);
+		const violation = findStrictToolSchemaViolation(normalizedParameters, "#", { rejectRootObjectUnion });
 		if (violation) {
 			logger.warn(
 				`Tool "${tool.name}" omitted from the openai-completions request: its parameter schema is invalid for this provider at ${violation} (an enum/const value cannot match its declared type, or leftover xAI object-root union). Other tools are unaffected.`,
@@ -2857,7 +2859,7 @@ function convertTools(
 			function: {
 				name: tool.name,
 				description: tool.description || "",
-				parameters: emittedParameters,
+				parameters: normalizedParameters,
 				// Only include strict if provider supports it. Some reject unknown fields.
 				...(includeStrict ? { strict: true } : includeExplicitFalse ? { strict: false } : {}),
 			},

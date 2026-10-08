@@ -517,7 +517,14 @@ function detectOpenAICompat(
 		disableReasoningWithTools: false,
 		supportsToolChoice: d.isClinePass || !d.isDirectDeepseekReasoning,
 		supportsForcedToolChoice:
-			!d.requiresEnabledThinking && !(d.isOpenCodeHost && d.isDeepseekReasoning) && !(d.isClinePass && isQwen),
+			!d.requiresEnabledThinking &&
+			!(
+				d.isDeepseekReasoning &&
+				(d.isOpenCodeHost ||
+					provider === "agentrouter" ||
+					(typeof baseUrl === "string" && baseUrl.includes("agentrouter")))
+			) &&
+			!(d.isClinePass && isQwen),
 		supportsNamedToolChoice: true,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: isMistral,

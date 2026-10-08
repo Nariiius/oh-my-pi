@@ -72,7 +72,13 @@ import {
 } from "../utils/idle-iterator";
 import { getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
+import {
+	adaptSchemaForStrict,
+	NO_STRICT,
+	normalizeOpenAIToolParameters,
+	sanitizeSchemaForOpenAIResponses,
+	toolWireSchema,
+} from "../utils/schema";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { compactGrammarDefinition } from "./grammar";
 import {
@@ -5162,7 +5168,7 @@ export function convertOpenAICodexResponsesTools(
 			type: "function",
 			name: tool.name,
 			description: tool.description || "",
-			parameters,
+			parameters: normalizeOpenAIToolParameters(parameters),
 			...(effectiveStrict ? { strict: true } : !NO_STRICT && tool.strict === false ? { strict: false } : {}),
 		});
 	}

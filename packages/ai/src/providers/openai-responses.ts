@@ -44,6 +44,7 @@ import {
 	findStrictToolSchemaViolation,
 	flattenExclusiveRequiredRootUnion,
 	NO_STRICT,
+	normalizeOpenAIToolParameters,
 	normalizeSchemaForMoonshot,
 	sanitizeSchemaForOpenAIResponses,
 	toolWireSchema,
@@ -1850,7 +1851,8 @@ export function convertTools(
 		// of the request valid instead of letting one bad MCP schema 400 the whole
 		// turn (#2652). Other tools and built-ins are unaffected. Leftover
 		// object-root unions are rejected only when declared by compatibility policy.
-		const violation = findStrictToolSchemaViolation(parameters, "#", { rejectRootObjectUnion });
+		const normalizedParameters = normalizeOpenAIToolParameters(parameters);
+		const violation = findStrictToolSchemaViolation(normalizedParameters, "#", { rejectRootObjectUnion });
 		if (violation) {
 			onQuarantine(tool.name, violation);
 			continue;
@@ -1859,7 +1861,7 @@ export function convertTools(
 			type: "function",
 			name: tool.name,
 			description: tool.description || "",
-			parameters,
+			parameters: normalizedParameters,
 			// `strict: false` and an omitted `strict` are NOT equivalent for every
 			// OpenAI-compat backend — some over-fill optional args when the flag is
 			// absent (#4336). Preserve the author's explicit `false` unless the

@@ -2823,3 +2823,53 @@ describe("grammar tool-schema normalization (issue #5914)", () => {
 		expect(properties?.outputSchema).toBe(true);
 	});
 });
+
+describe("OpenAI tool parameter normalization", () => {
+	it("ensures required: [] and properties: {} on tools with optional or empty parameters", async () => {
+		const model = buildModel({
+			...gpt4oMiniSpec,
+			provider: "custom",
+			baseUrl: "https://example.com/v1",
+		}) as Model<"openai-completions">;
+		const waitLikeTool: Tool = {
+			name: "wait",
+			description: "Wait only when blocked",
+			parameters: {
+				type: "object",
+				properties: { i: { type: "string", description: "concise intent" } },
+				additionalProperties: false,
+			},
+		};
+		const emptyTool: Tool = {
+			name: "empty_fn",
+			description: "No params",
+			parameters: {
+				type: "object",
+			},
+		};
+		const payload = await captureOpenAICompletionsPayload(model, {
+			...baseContext(),
+			tools: [waitLikeTool, emptyTool],
+		});
+		function getToolParams(payload: unknown, toolName: string): Record<string, unknown> {
+			const tools = toObject(payload)?.tools;
+			if (!Array.isArray(tools)) throw new Error("payload tools missing");
+			for (const entry of tools) {
+				const obj = toObject(entry);
+				const fn = toObject(obj?.function);
+				if (fn?.name === toolName) return toObject(fn.parameters) ?? {};
+			}
+			throw new Error(`tool ${toolName} not found in payload`);
+		}
+
+		const waitParams = getToolParams(payload, "wait");
+		expect(waitParams.type).toBe("object");
+		expect(waitParams.required).toEqual([]);
+		expect(toObject(waitParams.properties)).toHaveProperty("i");
+
+		const emptyParams = getToolParams(payload, "empty_fn");
+		expect(emptyParams.type).toBe("object");
+		expect(emptyParams.required).toEqual([]);
+		expect(emptyParams.properties).toEqual({});
+	});
+});

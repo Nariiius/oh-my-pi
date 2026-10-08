@@ -6,6 +6,7 @@ import {
 	isJsonObject,
 	mergeCompatibleEnumSchemas,
 	mergePropertySchemas,
+	normalizeOpenAIToolParameters,
 	stripResidualCombiners,
 } from "@oh-my-pi/pi-ai/utils/schema";
 
@@ -228,5 +229,51 @@ describe("adaptSchemaForStrict", () => {
 		const result = adaptSchemaForStrict(schema, true);
 		expect(result.strict).toBe(false);
 		expect(result.schema).toBe(schema);
+	});
+});
+
+describe("normalizeOpenAIToolParameters", () => {
+	it("ensures required: [] when required is missing on an object schema", () => {
+		const schema = {
+			type: "object",
+			properties: { i: { type: "string", description: "concise intent" } },
+			additionalProperties: false,
+		};
+		const result = normalizeOpenAIToolParameters(schema);
+		expect(result).toEqual({
+			type: "object",
+			properties: { i: { type: "string", description: "concise intent" } },
+			required: [],
+			additionalProperties: false,
+		});
+	});
+
+	it("ensures properties: {} and required: [] on empty or bare object schema", () => {
+		expect(normalizeOpenAIToolParameters({})).toEqual({
+			type: "object",
+			properties: {},
+			required: [],
+		});
+		expect(normalizeOpenAIToolParameters({ type: "object" })).toEqual({
+			type: "object",
+			properties: {},
+			required: [],
+		});
+	});
+
+	it("preserves existing required array and properties", () => {
+		const schema = {
+			type: "object",
+			properties: { command: { type: "string" }, timeout: { type: "number" } },
+			required: ["command"],
+			additionalProperties: false,
+		};
+		const result = normalizeOpenAIToolParameters(schema);
+		expect(result).toEqual({
+			type: "object",
+			properties: { command: { type: "string" }, timeout: { type: "number" } },
+			required: ["command"],
+			additionalProperties: false,
+		});
 	});
 });

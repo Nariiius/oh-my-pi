@@ -654,7 +654,7 @@ describe("openai-completions wire-quirk compat detection", () => {
 		).toBe(true);
 	});
 
-	it("downgrades forced tool choice only for DeepSeek reasoning models on OpenCode gateways", () => {
+	it("downgrades forced tool choice for DeepSeek reasoning models on non-NVIDIA hosts", () => {
 		const deepseekReasoning = {
 			id: "deepseek-v4-flash",
 			name: "DeepSeek V4 Flash",
@@ -676,6 +676,15 @@ describe("openai-completions wire-quirk compat detection", () => {
 					...deepseekReasoning,
 					provider: "custom",
 					baseUrl: "https://opencode.ai/zen/go/v1",
+				}),
+			).compat.supportsForcedToolChoice,
+		).toBe(false);
+		expect(
+			resolveModelPolicy(
+				completionsSpec({
+					...deepseekReasoning,
+					provider: "agentrouter",
+					baseUrl: "https://agentrouter.org/v1",
 				}),
 			).compat.supportsForcedToolChoice,
 		).toBe(false);
