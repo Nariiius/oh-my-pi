@@ -107,4 +107,9 @@ it("encodes bytes from ArrayBuffer, views, and serialized Buffer objects", () =>
 		data: { type: "Buffer", data: [4, 5, 6] } as unknown as Uint8Array,
 	});
 	expect(BinaryPayloadSchema.decode(fromBufferObj).data).toEqual(new Uint8Array([4, 5, 6]));
+
+	const fromIndexedObj = BinaryPayloadSchema.encode({
+		data: { "0": 7, "1": 8, "2": 9 } as unknown as Uint8Array,
+	});
+	expect(BinaryPayloadSchema.decode(fromIndexedObj).data).toEqual(new Uint8Array([7, 8, 9]));
 });

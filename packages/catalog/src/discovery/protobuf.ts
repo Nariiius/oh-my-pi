@@ -653,6 +653,24 @@ function requireBytes(value: unknown): Uint8Array {
 	) {
 		return new Uint8Array(value.data);
 	}
+	if (value && typeof value === "object" && !(value instanceof Date) && !(value instanceof RegExp)) {
+		const obj = value as Record<string, unknown>;
+		if (typeof obj[0] === "number") {
+			const keys = Object.keys(obj);
+			const len = typeof obj.length === "number" ? obj.length : keys.length;
+			const out = new Uint8Array(len);
+			let valid = true;
+			for (let i = 0; i < len; i++) {
+				const byte = obj[i];
+				if (typeof byte !== "number" || !Number.isInteger(byte) || byte < 0 || byte > 255) {
+					valid = false;
+					break;
+				}
+				out[i] = byte;
+			}
+			if (valid) return out;
+		}
+	}
 	throw new Error("Expected Uint8Array");
 }
 
