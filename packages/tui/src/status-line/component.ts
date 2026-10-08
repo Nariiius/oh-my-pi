@@ -3791,8 +3791,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const lines: string[] = [];
 		const sm = this.session.sessionManager;
 
-		// ── Line 1: Path ────────────────────────────────────────────
-		const cwd = typeof (sm as any)?.getCwd === "function" ? (sm as any).getCwd() : undefined;
+		// ── Line 1: Path, Account & Title ───────────────────────────
+		const cwd =
+			sm && typeof sm === "object" && "getCwd" in sm && typeof sm.getCwd === "function"
+				? (sm.getCwd as () => string)()
+				: undefined;
 		const branch = this.#getBranchLabel();
 		const sessionName = typeof sm?.getSessionName === "function" ? sm.getSessionName() : undefined;
 
@@ -3803,23 +3806,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		if (branch) pwd = `${pwd} (${branch})`;
 
-		const folderIcon = theme.icon.folder ? `${theme.icon.folder} ` : "";
-		const pathText = folderIcon + pwd;
-		const pathWidth = visibleWidth(pathText);
-		const nameStr = sessionName ? `${theme.sep.dot}${sessionName}` : "";
-		const nameWidth = visibleWidth(nameStr);
-		if (pathWidth + nameWidth <= width) {
-			const pad = " ".repeat(width - pathWidth - nameWidth);
-			lines.push(theme.fg("dim", pathText + pad + nameStr));
-		} else {
-			lines.push(theme.fg("dim", truncateToWidth(`${pathText}${nameStr}`, width)));
-		}
-
-		// ── Line 2: Stats + context + model ────────────────────────
 		const model = this.session.state.model;
 		const provider = model?.provider;
 
-		const parts: string[] = [];
+		let accountStr = "";
 		if (provider) {
 			const isGeminiOrOpenAi =
 				provider === "google-antigravity" ||
@@ -3832,10 +3822,25 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				const email = activeIdentity?.email ?? activeIdentity?.accountId;
 				if (email) {
 					const userIcon = theme.icon.user ? `${theme.icon.user} ` : "";
-					parts.push(theme.fg("dim", `${userIcon}${this.#formatCompactAccountEmail(email)}`));
+					accountStr = `${theme.sep.dot}${userIcon}${this.#formatCompactAccountEmail(email)}`;
 				}
 			}
 		}
+
+		const folderIcon = theme.icon.folder ? `${theme.icon.folder} ` : "";
+		const pathText = folderIcon + pwd + accountStr;
+		const pathWidth = visibleWidth(pathText);
+		const nameStr = sessionName ? `${theme.sep.dot}${sessionName}` : "";
+		const nameWidth = visibleWidth(nameStr);
+		if (pathWidth + nameWidth <= width) {
+			const pad = " ".repeat(width - pathWidth - nameWidth);
+			lines.push(theme.fg("dim", pathText + pad + nameStr));
+		} else {
+			lines.push(theme.fg("dim", truncateToWidth(`${pathText}${nameStr}`, width)));
+		}
+
+		// ── Line 2: Stats + context + model ────────────────────────
+		const parts: string[] = [];
 
 		const stats = sm?.getUsageStatistics?.() ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
 		const fmt = (n: number) =>
@@ -3860,7 +3865,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const rawName = model?.name ?? model?.id ?? "Unknown";
 		const mn = provider && !rawName.startsWith(`${provider}/`) ? `${provider}/${rawName}` : rawName;
 		const modelIcon = theme.icon.model ? `${theme.icon.model} ` : "";
-		const tl = (this.session as any).configuredThinkingLevel?.() ?? this.session.state.thinkingLevel;
+		const sessionWithConfigured = this.session as unknown as { configuredThinkingLevel?: () => ThinkingLevel | undefined };
+		const tl = sessionWithConfigured.configuredThinkingLevel?.() ?? this.session.state.thinkingLevel;
 		const thinkingGlyph =
 			tl !== undefined && (tl as string) !== ThinkingLevel.Off
 				? (theme.thinking[tl as keyof typeof theme.thinking] ?? tl)
