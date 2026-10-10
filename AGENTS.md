@@ -1,5 +1,9 @@
 # Development Rules
 
+## Upstream Integration
+
+Before merging or rebasing upstream, read [LOCAL_CHANGES.md](LOCAL_CHANGES.md). Preserve the documented local behavior across moved APIs, review the listed removed safeguards and unwired components, and update the guide after integration. Keep feature commits separate and stage explicit paths.
+
 ## Default Context
 
 This repo contains multiple packages, but **`packages/coding-agent/`** is the primary focus. Unless otherwise specified, assume work refers to this package.

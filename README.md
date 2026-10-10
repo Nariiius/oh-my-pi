@@ -20,6 +20,8 @@ A checkout of omp synced with upstream v18.1.14 with a UI/keybinding layer, mode
 
 Also kept from this branch: file-paste in the composer actually applies; the image/PDF path matches upstream v18 (no extra vision-fallback setting).
 
+For upstream merges, read [the full local-change and conflict guide](LOCAL_CHANGES.md): baseline, preserved behavior, conflict hotspots, known limitations, and verification commands.
+
 ## How to run this fork
 
 You need [Bun](https://bun.sh) ≥ 1.3.14 (and a Rust toolchain if natives are not already built).
