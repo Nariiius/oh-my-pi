@@ -1,4 +1,7 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as url from "node:url";
+import { beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { AttachmentChipsBand } from "@oh-my-pi/pi-tui/prompt/attachment-chips";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { chipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
@@ -7,6 +10,17 @@ import { ImageBudget } from "@oh-my-pi/pi-tui";
 import { setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
+import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { theme } from "@oh-my-pi/pi-tui/theme/theme";
+
+const nativeContext: DescribeContext = {
+	cols: 80,
+	reduceMotion: false,
+	dark: true,
+	supports: () => true,
+	feature: () => false,
+};
 
 // 2x2 red PNG — real header so the band's dimension probe decodes 2x2.
 const TINY_PNG =
@@ -37,6 +51,112 @@ describe("AttachmentChipsBand", () => {
 		// Snippet: leading content rows inside the border rails.
 		expect(rows[1]).toContain("line1");
 		expect(rows[2]).toContain("line2");
+	});
+
+	it("renders a file basename and path caption, hiding it after its token is deleted", () => {
+		const { editor, band } = makeBand();
+		const label = editor.stageFileAttachment("/tmp/a.ts", "@/tmp/a.ts");
+		editor.insertText(label);
+		const rows = band.render(80).map(Bun.stripANSI);
+		expect(rows).toHaveLength(6);
+		expect(rows[0]).toContain(label);
+		expect(rows[1]).toContain("a.ts");
+		expect(rows[5]).toContain("/tmp/a.ts");
+		for (const row of rows) expect(visibleWidth(row)).toBe(14);
+		editor.setText("no token here");
+		expect(band.render(80)).toEqual([]);
+		expect(band.describe(nativeContext)).toMatchObject({ p: { hidden: true }, c: [] });
+	});
+
+	it("describes a native file card with its identity, basename, shortened caption and encoded links", () => {
+		const { editor, band } = makeBand();
+		const filePath = path.join(os.homedir(), "notes", "a #1.ts");
+		const label = editor.stageFileAttachment(filePath, `@${filePath}`);
+		editor.insertText(label);
+		const href = url.pathToFileURL(filePath).href;
+		expect(band.describe(nativeContext)).toMatchObject({
+			k: "row",
+			p: { role: "omp.composer.chips", hidden: false },
+			c: [
+				{
+					k: "card",
+					key: "file:1",
+					p: { role: "omp.composer.chip", head: [{ t: label, href }] },
+					c: [
+						{ k: "text", p: { spans: [{ t: "a #1.ts" }] } },
+						{ k: "text", p: { spans: [{ t: "~/notes/a #1.ts", href }] } },
+					],
+				},
+			],
+		});
+	});
+
+	it("keeps unsafe filename controls out of both file card renderers without changing the link target", () => {
+		const { editor, band } = makeBand();
+		const filePath = "/tmp/\x1b[31mnote\n\x07.txt";
+		const label = editor.stageFileAttachment(filePath, `@${filePath}`);
+		editor.insertText(label);
+		applyHyperlinkSetting("always");
+		try {
+			const ansiRows = band.render(80);
+			expect(ansiRows[0]).toContain(url.pathToFileURL(filePath).href);
+			expect(ansiRows[5]).toContain(url.pathToFileURL(filePath).href);
+			expect(ansiRows.join("")).not.toContain("\x1b[31m");
+			expect(ansiRows.join("")).not.toContain("\x07");
+			expect(Bun.stripANSI(ansiRows[1])).toContain("note .txt");
+			for (const row of ansiRows) {
+				expect(row).not.toContain("\n");
+				expect(visibleWidth(row)).toBe(14);
+			}
+			expect(band.describe(nativeContext)).toMatchObject({
+				c: [
+					{
+						key: "file:1",
+						c: [
+							{ k: "text", p: { spans: [{ t: "note .txt" }] } },
+							{ k: "text", p: { spans: [{ t: "/tmp/note .txt", href: url.pathToFileURL(filePath).href }] } },
+						],
+					},
+				],
+			});
+		} finally {
+			applyHyperlinkSetting("auto");
+		}
+	});
+
+	it("shows file #10 without treating it as a reference to file #1", () => {
+		const { editor, band } = makeBand();
+		let label = "";
+		for (let n = 1; n <= 10; n++) label = editor.stageFileAttachment(`/tmp/${n}.ts`, `@/tmp/${n}.ts`);
+		editor.insertText(label);
+		const rows = band.render(80).map(Bun.stripANSI);
+		expect(rows[0]).toContain(chipLabel("file", 10));
+		expect(rows[1]).toContain("10.ts");
+		for (const row of rows) expect(visibleWidth(row)).toBe(14);
+		expect(band.describe(nativeContext)).toMatchObject({ c: [{ key: "file:10" }] });
+	});
+
+	it("keeps a recorded file identity when a theme override uses another attachment glyph", () => {
+		const { editor, band } = makeBand();
+		const symbol = theme.symbol.bind(theme);
+		const override = spyOn(theme, "symbol").mockImplementation(key => (key === "chip.file" ? "img" : symbol(key)));
+		let label: string;
+		try {
+			label = editor.stageFileAttachment("/tmp/a.ts", "@/tmp/a.ts");
+		} finally {
+			override.mockRestore();
+		}
+		editor.insertText(label);
+		expect(Bun.stripANSI(band.render(80)[0])).toContain("img #1");
+		expect(band.describe(nativeContext)).toMatchObject({
+			c: [
+				{
+					key: "file:1",
+					p: { head: [{ t: "img #1" }] },
+					c: [{ p: { spans: [{ t: "a.ts" }] } }, { p: { spans: [{ t: "/tmp/a.ts" }] } }],
+				},
+			],
+		});
 	});
 
 	it("captions a single-line paste with its character count", () => {

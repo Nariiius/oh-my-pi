@@ -16,7 +16,7 @@ import type { AppKeybinding } from "../app-keybindings";
 import { formatTooltipKey } from "../key-hint-format";
 import { MAIN_AGENT_ID } from "../overlays/agent-hub-types";
 import { compact, keyed, node, row, span } from "../native/describe";
-import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
+import { resolveTextEdit, type DescribeContext, type NativeNode, type NativeUiEvent } from "../native/node";
 import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
@@ -309,52 +309,25 @@ function extractExplicitPathSegments(payload: string): string[] | undefined {
  * read directly via `pbpaste`/PowerShell).
  */
 export function extractPastePathsFromText(text: string): string[] | undefined {
-	return extractExplicitPathSegments(text);
+	const paths = extractExplicitPathSegments(text);
+	if (paths !== undefined) return paths;
+	const wholePath = extractWholeTextAttachmentPath(text);
+	return wholePath ? [wholePath] : undefined;
 }
 
-/**
- * Whole-text-as-path pass shared by {@link extractImagePastePathsFromText}
- * and {@link extractImagePathFromText}: treat the entire text as one path
- * when it is anchored by {@link ABSOLUTE_PATH_PREFIX_REGEX}, contains no
- * newlines, and points at a vision-previewable image or video extension. Recovers single paths
- * whose unescaped spaces defeat the segment splitter (macOS screenshot names).
- *
- * Refuses payloads carrying a second {@link INTERIOR_PATH_ANCHOR_REGEX} anchor.
- * Dragging two files at once emits `/tmp/a.png /tmp/b shot.png`, which the
- * splitter also refuses (`shot.png` is not explicit); swallowing it as one path
- * attaches nothing, and `handleImagePathPaste`'s ENOENT branch only surfaces a
- * status — unlike its other failure branches it never re-pastes the text — so
- * both paths would vanish. Genuinely ambiguous input lands here too (a
- * directory whose name ends in a space, as in `/tmp/odd dir /sub/x.png`); a
- * plain text paste is the losing-nothing outcome, so ambiguity resolves that way.
- */
+/** Recover one absolute path containing unescaped spaces; a second path anchor stays plain text. */
 function extractWholeTextAttachmentPath(text: string): string | undefined {
 	const trimmed = text.trim();
 	if (!trimmed || /[\r\n]/.test(trimmed) || !ABSOLUTE_PATH_PREFIX_REGEX.test(trimmed)) return undefined;
 	if (INTERIOR_PATH_ANCHOR_REGEX.test(trimmed)) return undefined;
 	const wholePath = normalizePastedPath(trimmed);
-	return wholePath && isExplicitPastedPath(wholePath) && isPreviewableAttachmentPath(wholePath)
-		? wholePath
-		: undefined;
+	return wholePath && isExplicitPastedPath(wholePath) ? wholePath : undefined;
 }
 
-/**
- * Same shape as {@link extractBracketedImagePastePaths} but operates on a
- * payload that has already been stripped of the `\x1b[200~` / `\x1b[201~`
- * markers — used by the assembled-paste router in {@link CustomEditor.handleInput}
- * so split bracketed pastes get the same attachment-path detection as single-chunk ones.
- *
- * When the segment splitter fails (an unescaped space in a real path breaks
- * its every-segment-is-a-path invariant), falls back to
- * {@link extractWholeTextAttachmentPath}, so a dropped macOS screenshot
- * (`Screenshot 2026-06-25 at 1.23.45 PM.png`) attaches as an image instead of
- * degrading to literal text (#6578).
- */
+/** The shared path parser restricted to image/video previews. */
 export function extractImagePastePathsFromText(text: string): string[] | undefined {
 	const paths = extractPastePathsFromText(text);
-	if (paths !== undefined) return paths.every(isPreviewableAttachmentPath) ? paths : undefined;
-	const wholePath = extractWholeTextAttachmentPath(text);
-	return wholePath ? [wholePath] : undefined;
+	return paths?.every(isPreviewableAttachmentPath) ? paths : undefined;
 }
 
 function bracketedPastePayload(data: string): string | undefined {
@@ -379,33 +352,10 @@ export function extractBracketedImagePastePath(data: string): string | undefined
 	return paths?.length === 1 ? paths[0] : undefined;
 }
 
-/**
- * Return a single previewable file path when `text` is exactly one explicit
- * image (`.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`) or video path. Used by the
- * keybind-driven clipboard image paste path so a
- * clipboard whose only payload is an image file (e.g. Finder `Cmd+C` on
- * macOS) attaches the image instead of pasting the path as literal text.
- *
- * Two-stage detection:
- *
- * 1. Splitter pass (shared with the bracketed-paste handler) — handles
- *    quoted paths, shell-escaped spaces, and unambiguous single tokens.
- *    Returns the single previewable path when it parses cleanly; explicitly
- *    returns `undefined` when the splitter found multiple segments (so
- *    ambiguous multi-path clipboard text like `/tmp/a.png /tmp/b.png`
- *    still falls through to the text fallback instead of being mis-loaded
- *    as one giant path).
- * 2. {@link extractWholeTextAttachmentPath} — only reached when the splitter
- *    failed (every segment must look like an explicit path; an unescaped
- *    space in a real path breaks that). This is what recovers macOS
- *    screenshot filenames like
- *    `/Users/me/Desktop/Screenshot 2026-06-25 at 1.23.45 PM.png`.
- */
+/** The clipboard image shortcut accepts only one previewable path. */
 export function extractImagePathFromText(text: string): string | undefined {
 	const paths = extractPastePathsFromText(text);
-	if (paths?.length === 1 && isPreviewableAttachmentPath(paths[0])) return paths[0];
-	if (paths !== undefined) return undefined;
-	return extractWholeTextAttachmentPath(text);
+	return paths?.length === 1 && isPreviewableAttachmentPath(paths[0]) ? paths[0] : undefined;
 }
 
 /**
@@ -444,9 +394,17 @@ export interface TextAttachment {
 	charCount: number;
 }
 
-/** One visible composer attachment, in band order (vision attachments first, then text pastes). */
+/** A local file staged for the existing mention-ingestion pipeline. */
+export interface FileAttachment {
+	n: number;
+	label: string;
+	path: string;
+}
+
+/** One visible composer attachment, in band order (vision, files, then text pastes). */
 export type ComposerChipDescriptor =
 	| { kind: "image" | "video"; n: number; image: ImageContent; link: string | undefined }
+	| { kind: "file"; n: number; file: FileAttachment }
 	| { kind: "paste"; n: number; text: TextAttachment };
 
 /**
@@ -468,6 +426,9 @@ export class CustomEditor extends Editor {
 	 *  (labels key the atom table). */
 	pendingTexts: TextAttachment[] = [];
 	#textAttachmentCounter = 0;
+	/** Records survive token deletion so undo restores attachments without recycling numbers. */
+	pendingFiles: FileAttachment[] = [];
+	#fileAttachmentCounter = 0;
 	#composerChipsCache:
 		| {
 				textRevision: number;
@@ -477,6 +438,8 @@ export class CustomEditor extends Editor {
 				imageLinkCount: number;
 				texts: TextAttachment[];
 				textCount: number;
+				files: FileAttachment[];
+				fileCount: number;
 				chips: ComposerChipDescriptor[];
 		  }
 		| undefined;
@@ -545,6 +508,8 @@ export class CustomEditor extends Editor {
 		this.pendingImageLinks = [];
 		this.pendingTexts = [];
 		this.#textAttachmentCounter = 0;
+		this.pendingFiles = [];
+		this.#fileAttachmentCounter = 0;
 	}
 
 	/** Preserve a canceled draft in local navigation, then clear the composer. */
@@ -558,12 +523,16 @@ export class CustomEditor extends Editor {
 		const imageLinks = this.imageLinks;
 		const texts = [...this.pendingTexts];
 		const counter = this.#textAttachmentCounter;
+		const files = [...this.pendingFiles];
+		const fileCounter = this.#fileAttachmentCounter;
 		this.rememberDraft(() => {
 			this.pendingImages = [...images];
 			this.pendingImageLinks = [...links];
 			this.imageLinks = imageLinks;
 			this.pendingTexts = [...texts];
 			this.#textAttachmentCounter = counter;
+			this.pendingFiles = [...files];
+			this.#fileAttachmentCounter = fileCounter;
 			if (this.pendingImages.length > 0 && this.pendingImageLinks.some(link => link === undefined)) {
 				void this.#materializeDraftLinks();
 			}
@@ -577,6 +546,8 @@ export class CustomEditor extends Editor {
 		this.pendingImageLinks = [];
 		this.pendingTexts = [];
 		this.#textAttachmentCounter = 0;
+		this.pendingFiles = [];
+		this.#fileAttachmentCounter = 0;
 		super.restoreHistoryState(restore);
 	}
 
@@ -588,6 +559,8 @@ export class CustomEditor extends Editor {
 		this.clearPasteState();
 		this.pendingTexts = [];
 		this.#textAttachmentCounter = 0;
+		this.pendingFiles = [];
+		this.#fileAttachmentCounter = 0;
 		this.imageLinks = undefined;
 		this.pendingImages = images ? [...images] : [];
 		this.pendingImageLinks = images ? images.map(() => undefined) : [];
@@ -720,6 +693,15 @@ export class CustomEditor extends Editor {
 		this.insertAtom(label, expansion);
 	}
 
+	/** Register a file token without editing the buffer; native replacements remain one undo unit. */
+	stageFileAttachment(path: string, expansion: string): string {
+		const n = ++this.#fileAttachmentCounter;
+		const label = chipLabel("file", n);
+		this.pendingFiles.push({ n, label, path });
+		this.registerAtom(label, expansion);
+		return label;
+	}
+
 	/** Cached read-only attachments whose chip token remains in the buffer.
 	 * Deleting a token hides its chip and drops the attachment from submission. */
 	composerChips(): readonly ComposerChipDescriptor[] {
@@ -731,7 +713,9 @@ export class CustomEditor extends Editor {
 			cached.imageLinks === this.pendingImageLinks &&
 			cached.imageLinkCount === this.pendingImageLinks.length &&
 			cached.texts === this.pendingTexts &&
-			cached.textCount === this.pendingTexts.length
+			cached.textCount === this.pendingTexts.length &&
+			cached.files === this.pendingFiles &&
+			cached.fileCount === this.pendingFiles.length
 		) {
 			return cached.chips;
 		}
@@ -752,6 +736,9 @@ export class CustomEditor extends Editor {
 			// A reused label belongs to the atom currently expanding it, not a deleted paste.
 			if (!recorded.has(entry.label)) recorded.set(entry.label, "paste");
 		}
+		for (const entry of this.pendingFiles) {
+			if (!recorded.has(entry.label)) recorded.set(entry.label, "file");
+		}
 		const refs = referencedAttachments(this.getText(), recorded);
 		const chips: ComposerChipDescriptor[] = [];
 		for (let i = 0; i < this.pendingImages.length; i++) {
@@ -766,6 +753,9 @@ export class CustomEditor extends Editor {
 				link: this.pendingImageLinks[i],
 			});
 		}
+		for (const entry of this.pendingFiles) {
+			if (refs.file.has(entry.n)) chips.push({ kind: "file", n: entry.n, file: entry });
+		}
 		for (const entry of this.pendingTexts) {
 			if (!refs.paste.has(entry.n)) continue;
 			chips.push({ kind: "paste", n: entry.n, text: entry });
@@ -778,6 +768,8 @@ export class CustomEditor extends Editor {
 			imageLinkCount: this.pendingImageLinks.length,
 			texts: this.pendingTexts,
 			textCount: this.pendingTexts.length,
+			files: this.pendingFiles,
+			fileCount: this.pendingFiles.length,
 			chips,
 		};
 		return chips;
@@ -1348,6 +1340,16 @@ export class CustomEditor extends Editor {
 	 * for recall and waiting for in-flight clipboard work.
 	 */
 	override handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "edit" && this.onPasteFilePath) {
+			const paths = extractPastePathsFromText(event.text);
+			const current = this.getText();
+			if (paths && resolveTextEdit(current, event, text => text)) {
+				const text = this.#prepareFilePaste(event.text, paths);
+				const mapped = resolveTextEdit(current, event, () => text);
+				if (mapped) this.applyHostEdit({ ...event, text, cursor: mapped.cursor });
+				return;
+			}
+		}
 		if (event.type === "send") {
 			// A send is its own prompt: never submit a stale draft for blank input,
 			// and retain a displaced draft (including its attachments) for recall.
@@ -1356,8 +1358,9 @@ export class CustomEditor extends Editor {
 				this.#pendingInput.push(event);
 				return;
 			}
+			const paths = this.onPasteFilePath ? extractPastePathsFromText(event.text) : undefined;
 			this.clearDraftForRecall();
-			this.setCollapsedText(event.text);
+			this.setCollapsedText(paths ? this.#prepareFilePaste(event.text, paths) : event.text);
 			this.submit();
 			return;
 		}
@@ -1381,6 +1384,16 @@ export class CustomEditor extends Editor {
 		}
 	}
 
+	#prepareFilePaste(content: string, paths: readonly string[]): string {
+		const tokens: string[] = [];
+		for (const path of paths) {
+			const token = this.onPasteFilePath?.(path);
+			if (token === undefined) return content;
+			tokens.push(token);
+		}
+		return tokens.join(" ") + " ";
+	}
+
 	onEscape?: () => void;
 	onClear?: () => void;
 	onExit?: () => void;
@@ -1397,6 +1410,8 @@ export class CustomEditor extends Editor {
 	onPasteImage?: () => Promise<boolean>;
 	/** Called when a bracketed paste contains one or more image or video file paths. */
 	onPasteImagePath?: (path: string) => void | Promise<void>;
+	/** Prepare a file atom and return its token; undefined preserves the original paste. */
+	onPasteFilePath?: (path: string) => string | undefined;
 	/** Called when the configured raw text-paste shortcut is pressed. */
 	onPasteTextRaw?: () => void;
 	/** Called when the configured dequeue shortcut is pressed. */
@@ -1562,6 +1577,7 @@ export class CustomEditor extends Editor {
 		//  - empty payload → `onPasteImage` (#3601: `Cmd+V`/`Ctrl+V` on an
 		//    image-only macOS pasteboard the terminal stripped to `""` first);
 		//  - explicit image-file paths → `onPasteImagePath` (#3506);
+		// Other explicit local file paths become file atoms using the same parser.
 		//  - anything else → the base editor's `pasteText` so `[Paste #N]`
 		//    markers, autocomplete, and undo state stay intact.
 		const paste = this.#pasteHandler.process(data);
@@ -1584,6 +1600,12 @@ export class CustomEditor extends Editor {
 						for (const p of attachmentPaths) await this.onPasteImagePath?.(p);
 					})(),
 				);
+				return;
+			}
+			const paths = this.onPasteFilePath ? extractPastePathsFromText(content) : undefined;
+			if (paths) {
+				this.pasteText(this.#prepareFilePaste(content, paths));
+				this.#drainPendingInput();
 				return;
 			}
 			// A submit key that shared the read (see `StdinBuffer`'s paste event) is

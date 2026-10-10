@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
@@ -11,16 +12,18 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
-import { fileHyperlink } from "../render/hyperlink";
+import { fileHyperlink, fileLinkSpan } from "../render/hyperlink";
+import { shortenPath } from "../render/render-utils";
+import { sanitizeDisplaySingleLine } from "../overlays/extensions/display-text";
 import { registerNativeBlob } from "../native/blobs";
 import { node, row, span } from "../native/describe";
 import { plainText } from "../native/spans";
 import type { DescribeContext, NativeNode } from "../native/node";
 import { convertImageToPng } from "../chat/image-loading";
-import { attachmentSgr } from "./composer-attachments";
+import { attachmentSgr, chipLabel } from "./composer-attachments";
 import { cachedImageDimensions, setCachedImageDimensions } from "./image-references";
 import { theme } from "../theme/theme";
-import type { ComposerChipDescriptor, CustomEditor, TextAttachment } from "./custom-editor";
+import type { ComposerChipDescriptor, CustomEditor } from "./custom-editor";
 
 /** Chip card geometry (mirrors omp2): a 12x4 content area inside a 1-cell rounded border. */
 const INNER_COLS = 12;
@@ -46,7 +49,8 @@ interface ImageContentWithPng extends ImageContent {
  * the prompt box. Image and video cards show a live thumbnail (Kitty Unicode placeholders — the only
  * protocol whose output is plain text cells and therefore composable inside a border row) with
  * the pixel dimensions as the bottom caption; text-paste cards show the leading snippet with a
- * `+N lines` / `N chars` caption. The top caption is the same `<icon> #N` token that sits in
+ * `+N lines` / `N chars` caption. File cards show a basename and shortened path caption.
+ * The top caption is the same `<icon> #N` token that sits in
  * the editor buffer, in the same identity color. Cards that no longer fit the terminal width
  * are omitted rather than wrapped. Renders to nothing while no attachment is staged.
  */
@@ -70,16 +74,20 @@ export class AttachmentChipsBand implements Component {
 		if (this.#native?.chips === chips) return this.#native.node;
 		const cards: NativeNode[] = [];
 		for (const chip of chips) {
-			const icon = theme.symbol(
-				chip.kind === "paste" ? "chip.paste" : chip.kind === "video" ? "chip.video" : "chip.image",
-			);
-			const title = `${icon} #${chip.n}`;
+			const title = chip.kind === "file" ? chip.file.label : chipLabel(chip.kind, chip.n);
 			let content: NativeNode;
 			let caption: string;
 			if (chip.kind === "paste") {
 				caption = chip.text.lineCount > 1 ? `+${chip.text.lineCount} lines` : `${chip.text.charCount} chars`;
 				content = node("text", {
 					spans: [span(plainText(chip.text.content.split("\n", 4).join("\n")), "muted")],
+					wrap: "none",
+					lines: 4,
+				});
+			} else if (chip.kind === "file") {
+				caption = sanitizeDisplaySingleLine(shortenPath(chip.file.path));
+				content = node("text", {
+					spans: [span(sanitizeDisplaySingleLine(path.basename(chip.file.path)), "muted")],
 					wrap: "none",
 					lines: 4,
 				});
@@ -98,9 +106,17 @@ export class AttachmentChipsBand implements Component {
 				});
 			}
 			const head =
-				chip.kind !== "paste" && chip.link ? [span(title, "strong", { href: chip.link })] : [span(title, "strong")];
+				chip.kind === "file"
+					? [fileLinkSpan(chip.file.path, title, "strong")]
+					: chip.kind !== "paste" && chip.link
+						? [span(title, "strong", { href: chip.link })]
+						: [span(title, "strong")];
 			const children: NativeNode[] = [content];
-			if (caption) children.push(node("text", { spans: [span(caption, "dim")], wrap: "none" }));
+			if (caption) {
+				const captionSpan =
+					chip.kind === "file" ? fileLinkSpan(chip.file.path, caption, "dim") : span(caption, "dim");
+				children.push(node("text", { spans: [captionSpan], wrap: "none" }));
+			}
 			cards.push(
 				node("card", { role: "omp.composer.chip", tone: "accent", head }, children, `${chip.kind}:${chip.n}`),
 			);
@@ -127,22 +143,27 @@ export class AttachmentChipsBand implements Component {
 
 	#card(chip: ComposerChipDescriptor): string[] {
 		const sgr = attachmentSgr(chip.kind, chip.n);
-		const icon = theme.symbol(
-			chip.kind === "paste" ? "chip.paste" : chip.kind === "video" ? "chip.video" : "chip.image",
-		);
+		const label = chip.kind === "file" ? chip.file.label : chipLabel(chip.kind, chip.n);
 		let bottomCaption: string;
 		let interior: string[];
-		if (chip.kind !== "paste") {
+		if (chip.kind === "file") {
+			bottomCaption = fileHyperlink(chip.file.path, sanitizeDisplaySingleLine(shortenPath(chip.file.path)));
+			interior = this.#textInterior(sanitizeDisplaySingleLine(path.basename(chip.file.path)));
+		} else if (chip.kind !== "paste") {
 			const dims = this.#imageDims(chip.image);
 			bottomCaption = dims ? `${dims.width}x${dims.height}` : "";
 			interior = this.#imageInterior(chip.image, dims, chip.kind);
 		} else {
 			bottomCaption = chip.text.lineCount > 1 ? `+${chip.text.lineCount} lines` : `${chip.text.charCount} chars`;
-			interior = this.#textInterior(chip.text);
+			interior = this.#textInterior(chip.text.content);
 		}
 		const vertical = `${sgr}${theme.symbol("boxRound.vertical")}${RESET_FG}`;
 		const title =
-			chip.kind === "paste" || !chip.link ? `${icon} #${chip.n}` : fileHyperlink(chip.link, `${icon} #${chip.n}`);
+			chip.kind === "file"
+				? fileHyperlink(chip.file.path, label)
+				: chip.kind === "paste" || !chip.link
+					? label
+					: fileHyperlink(chip.link, label);
 		return [
 			this.#borderRow(sgr, title, "top"),
 			...interior.map(row => vertical + row + vertical),
@@ -247,10 +268,10 @@ export class AttachmentChipsBand implements Component {
 		return rows;
 	}
 
-	/** Leading 4 rows x 12 cols of the pasted text, muted. */
-	#textInterior(entry: TextAttachment): string[] {
+	/** Leading 4 rows x 12 cols of text, muted. */
+	#textInterior(content: string): string[] {
 		// Only the leading rows are drawn; don't split a multi-KB paste every frame.
-		const lines = entry.content.split("\n", INNER_ROWS);
+		const lines = content.split("\n", INNER_ROWS);
 		const rows: string[] = [];
 		for (let r = 0; r < INNER_ROWS; r++) {
 			const cut = truncateToWidth(replaceTabs(lines[r] ?? ""), INNER_COLS);

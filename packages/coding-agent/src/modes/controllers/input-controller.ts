@@ -645,6 +645,7 @@ export class InputController {
 		);
 		this.ctx.editor.onPasteImage = () => this.handleImagePaste();
 		this.ctx.editor.onPasteImagePath = path => this.handleImagePathPaste(path);
+		this.ctx.editor.onPasteFilePath = path => this.handleFilePaste(path);
 		this.ctx.editor.setActionKeys(
 			"app.clipboard.pasteTextRaw",
 			this.ctx.keybindings.getKeys("app.clipboard.pasteTextRaw"),
@@ -2365,49 +2366,27 @@ export class InputController {
 	 * Handle a file path pasted into the editor (from drag-drop or terminal paste).
 	 * Returns a replacement string for the editor, or undefined to keep the raw path.
 	 */
-	async handleFilePaste(filePath: string): Promise<string | undefined> {
+	handleFilePaste(filePath: string): string | undefined {
 		const trimmed = filePath.trim();
-		if (!trimmed || !fsSync.existsSync(trimmed)) return undefined;
-
-		const ext = path.extname(trimmed).toLowerCase();
-		const IMAGE_EXT: Record<string, true> = {
-			".png": true,
-			".jpg": true,
-			".jpeg": true,
-			".gif": true,
-			".webp": true,
-			".bmp": true,
-			".svg": true,
-			".heic": true,
-			".ico": true,
-			".tiff": true,
-			".tif": true,
-		};
-
-		if (IMAGE_EXT[ext]) {
-			await this.handleImagePathPaste(trimmed);
-			return "";
+		if (!trimmed) return undefined;
+		let resolved: string;
+		try {
+			resolved = resolveReadPath(trimmed, this.ctx.sessionManager.getCwd());
+			if (!fsSync.statSync(resolved).isFile()) return undefined;
+		} catch {
+			return undefined;
 		}
 
-		// Non-image file: insert an @-mention so the auto-read pipeline embeds the
-		// file content on submit — the same convention as the @-completion selector.
-		// The previous `[File: basename]` label dropped the path entirely: the
-		// editor's paste sanitizer strips its SGR/OSC 8 styling, and with no
-		// resolvable `@path` in the buffer the submit-time extractor never embeds.
-		const mention = /[\s"'@]/.test(trimmed)
-			? // Quoted form matches FILE_MENTION_REGEX; prefer double quotes, fall back
-				// to single quotes when the path itself contains a double quote. A path
-				// containing both quote characters has no embeddable quoting form — keep
-				// the raw text (hook contract: undefined = insert as typed).
-				!trimmed.includes('"')
-				? `@"${trimmed}"`
-				: !trimmed.includes("'")
-					? `@'${trimmed}'`
+		// shortcut: both-quote filenames stay raw; extend @mention quoting to support them.
+		const mention = /[\s"'@)\]]|[.,;:!?]$/.test(resolved)
+			? !resolved.includes('"')
+				? `@"${resolved}"`
+				: !resolved.includes("'")
+					? `@'${resolved}'`
 					: undefined
-			: `@${trimmed}`;
+			: `@${resolved}`;
 		if (mention === undefined) return undefined;
-		this.ctx.editor.insertTextAttachment(trimmed, mention);
-		return "";
+		return this.ctx.editor.stageFileAttachment(resolved, mention);
 	}
 
 	async handleImagePaste(): Promise<boolean> {
@@ -2515,7 +2494,7 @@ export class InputController {
 			} else if (promptTarget && !promptPaste) {
 				promptTarget.pasteText(text);
 			} else {
-				sink.pasteText(text);
+				sink.pasteText(promptTarget ? text : (this.handleFilePaste(text) ?? text));
 			}
 			this.ctx.ui.requestRender();
 			return true;

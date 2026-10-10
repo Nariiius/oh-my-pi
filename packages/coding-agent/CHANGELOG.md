@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Attach pasted file paths as atomic composer chips with filename/path cards in terminal and Tern native input, using existing file ingestion on submit and preserving removal, undo, and cleared-draft recall.
+
 ## [18.8.3] - 2026-10-07
 
 ### Fixed

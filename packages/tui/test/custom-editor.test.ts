@@ -1134,3 +1134,84 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		expect(events).toEqual([]);
 	});
 });
+
+describe("CustomEditor file attachment lifecycle", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	function fileEditor(): CustomEditor {
+		const editor = new CustomEditor(getEditorTheme());
+		editor.onPasteFilePath = path => editor.stageFileAttachment(path, '@"' + path + '"');
+		return editor;
+	}
+
+	it("replaces a native selection with a file and restores the selection content in one undo", () => {
+		const editor = fileEditor();
+		editor.setText("review old suffix");
+		const path = "/tmp/code with spaces.ts";
+		editor.handleNativeEvent({
+			type: "edit",
+			key: "input",
+			from: 7,
+			to: 10,
+			text: path,
+			cursor: 7 + path.length,
+			len: 17,
+		});
+		expect(editor.composerChips().map(chip => chip.kind)).toEqual(["file"]);
+		expect(editor.getExpandedText()).toBe('review @"' + path + '"  suffix');
+		expect(editor.getCursor()).toEqual({ line: 0, col: 7 + editor.pendingFiles[0]!.label.length + 1 });
+		editor.handleNativeEvent({ type: "undo", key: "input" });
+		expect(editor.getText()).toBe("review old suffix");
+		expect(editor.composerChips()).toEqual([]);
+	});
+
+	it("deletes a file atom and restores its ingestion on undo without recycling its identity", () => {
+		const editor = fileEditor();
+		editor.handleInput("\x1b[200~/tmp/first.ts\x1b[201~");
+		const first = editor.pendingFiles[0]!;
+		editor.handleInput("\x7f");
+		editor.handleInput("\x7f");
+		expect(editor.composerChips()).toEqual([]);
+		expect(editor.getExpandedText()).toBe("");
+		editor.handleNativeEvent({ type: "undo", key: "input" });
+		expect(editor.getExpandedText()).toBe('@"/tmp/first.ts"');
+		expect(editor.composerChips()).toEqual([{ kind: "file", n: first.n, file: first }]);
+		editor.handleInput("\x1b[200~/tmp/second.ts\x1b[201~");
+		expect(editor.pendingFiles.map(file => file.n)).toEqual([1, 2]);
+	});
+
+	it("submits an explicit native file prompt and recalls the displaced file draft", () => {
+		const editor = fileEditor();
+		const submitted: string[] = [];
+		editor.onSubmit = text => {
+			submitted.push(text);
+		};
+		editor.handleInput("\x1b[200~/tmp/draft.ts\x1b[201~");
+		editor.handleNativeEvent({ type: "send", key: "input", text: "/tmp/sent.ts" });
+		expect(submitted).toEqual(['@"/tmp/sent.ts"']);
+		editor.clearDraft();
+		expect(editor.pendingFiles).toEqual([]);
+		editor.handleInput("\x1b[A");
+		expect(editor.getExpandedText()).toBe('@"/tmp/draft.ts" ');
+		expect(editor.composerChips().map(chip => chip.kind)).toEqual(["file"]);
+	});
+
+	it("rejects stale native file replacements without leaving a visible or submitted attachment", () => {
+		const editor = fileEditor();
+		editor.setText("keep");
+		editor.handleNativeEvent({
+			type: "edit",
+			key: "input",
+			from: 0,
+			to: 4,
+			text: "/tmp/stale.ts",
+			cursor: 13,
+			len: 0,
+		});
+		expect(editor.getExpandedText()).toBe("keep");
+		expect(editor.pendingFiles).toEqual([]);
+		expect(editor.composerChips()).toEqual([]);
+	});
+});

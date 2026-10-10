@@ -1053,7 +1053,9 @@ export class ModelBrowser implements Component {
 	#probe: ReadonlyMap<string, { ok: boolean; latencyMs?: number; probedAt?: number; error?: string }> = new Map();
 
 	/** Probe-run verdicts keyed by `provider/id` selector (see AgentStorage.getModelProbeResults). */
-	setProbeResults(probe: ReadonlyMap<string, { ok: boolean; latencyMs?: number; probedAt?: number; error?: string }>): void {
+	setProbeResults(
+		probe: ReadonlyMap<string, { ok: boolean; latencyMs?: number; probedAt?: number; error?: string }>,
+	): void {
 		this.#probe = probe;
 	}
 

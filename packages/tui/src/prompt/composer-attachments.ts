@@ -3,8 +3,8 @@ import { MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
 import { SYMBOL_PRESETS } from "../theme/symbols";
 import { type ThemeColor, theme } from "../theme/theme";
 
-/** Attachment chip kinds staged in the composer: images, video previews, and large text pastes. */
-export type ChipKind = "image" | "video" | "paste";
+/** Attachment chip kinds staged in the composer. */
+export type ChipKind = "image" | "video" | "paste" | "file";
 
 /** Compact atomic composer token for an invoked skill in the active symbol preset. */
 export function skillChipLabel(name: string): string {
@@ -99,7 +99,7 @@ export function collapseModelMentions(
 	});
 }
 
-const CHIP_ICON_KEY = { image: "chip.image", video: "chip.video", paste: "chip.paste" } as const;
+const CHIP_ICON_KEY = { image: "chip.image", video: "chip.video", paste: "chip.paste", file: "chip.file" } as const;
 
 /** Chip glyph the active theme renders for `kind`, including `symbols.overrides`. */
 function activeChipIcon(kind: ChipKind): string {
@@ -118,16 +118,16 @@ const CHIP_ICONS: Record<ChipKind, readonly string[]> = {
 	image: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.image]))],
 	video: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.video]))],
 	paste: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.paste]))],
+	file: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.file]))],
 };
 
-const CHIP_TOKEN_SOURCE = `(?:${[...CHIP_ICONS.image, ...CHIP_ICONS.video, ...CHIP_ICONS.paste]
-	.map(glyphSource)
-	.join("|")}) #[1-9]\\d*`;
+const CHIP_TOKEN_SOURCE = `(?:${Object.values(CHIP_ICONS).flat().map(glyphSource).join("|")}) #[1-9]\\d*`;
 
 /** Infers an attachment kind from a chip label emitted by any configured symbol preset. */
 export function chipLabelKind(label: string): ChipKind {
 	if (CHIP_ICONS.image.some(icon => label.startsWith(icon))) return "image";
 	if (CHIP_ICONS.video.some(icon => label.startsWith(icon))) return "video";
+	if (CHIP_ICONS.file.some(icon => label.startsWith(icon))) return "file";
 	return "paste";
 }
 
@@ -147,7 +147,9 @@ export function attachmentRgb(kind: ChipKind, n: number): readonly [number, numb
 			? (n - 1) % ATTACHMENT_PALETTE.length
 			: kind === "video"
 				? (n + 1) % ATTACHMENT_PALETTE.length
-				: (n + 2) % ATTACHMENT_PALETTE.length;
+				: kind === "paste"
+					? (n + 2) % ATTACHMENT_PALETTE.length
+					: (n + 3) % ATTACHMENT_PALETTE.length;
 	return ATTACHMENT_PALETTE[index];
 }
 
@@ -170,15 +172,15 @@ let cachedScanner: { source: string; scanner: RegExp } | undefined;
 
 /**
  * Attachment indices referenced by a composer buffer, per kind. Image/video count compact chips
- * and expanded markers; paste counts compact chips only, since `[Paste #N]` markers number the
- * base editor's separate paste buffer. Registered labels take precedence over theme glyphs so
+ * and expanded markers; files and pastes count compact chips only, since `[Paste #N]` markers
+ * number the base editor's separate paste buffer. Registered labels take precedence over theme glyphs so
  * tokens created before a theme switch keep their kind; full numbers prevent `#1` matching `#10`.
  */
 export function referencedAttachments(
 	text: string,
 	recorded: ReadonlyMap<string, ChipKind>,
 ): Record<ChipKind, Set<number>> {
-	const kinds: readonly ChipKind[] = ["image", "video", "paste"];
+	const kinds: readonly ChipKind[] = ["image", "video", "paste", "file"];
 	const kindByIcon = new Map<string, ChipKind>();
 	for (const kind of kinds) for (const icon of CHIP_ICONS[kind]) kindByIcon.set(icon, kind);
 	for (const kind of kinds) kindByIcon.set(activeChipIcon(kind), kind);
@@ -189,7 +191,12 @@ export function referencedAttachments(
 	if (cachedScanner?.source !== source) cachedScanner = { source, scanner: new RegExp(source, "gu") };
 	const { scanner } = cachedScanner;
 
-	const refs: Record<ChipKind, Set<number>> = { image: new Set(), video: new Set(), paste: new Set() };
+	const refs: Record<ChipKind, Set<number>> = {
+		image: new Set(),
+		video: new Set(),
+		paste: new Set(),
+		file: new Set(),
+	};
 	for (const match of text.matchAll(scanner)) {
 		if (match[1] === "Image") refs.image.add(Number(match[2]));
 		else if (match[1] === "Video") refs.video.add(Number(match[2]));
@@ -300,7 +307,7 @@ export function compactImageMarkers(
 }
 
 /** Attachment kinds understood by placeholder renderers. */
-export type PlaceholderKind = "image" | "video" | "paste";
+export type PlaceholderKind = ChipKind;
 
 /** Rendering callbacks for plain text and parsed attachment references. */
 export interface PlaceholderRenderers {

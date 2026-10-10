@@ -237,11 +237,11 @@ export interface ComposerFacts {
 	 * the share as `label` and the window as `total`.
 	 */
 	readonly context: NativeNode;
-	/** The model chip's label: name plus the advisor, fast-mode and slow-mode marks. */
+	/** The model chip's label: provider/name plus the advisor, fast-mode and slow-mode marks. */
 	readonly model: SegmentView;
 	/**
-	 * `status` (role `omp.composer.extras`, `grow: 1`) of the other configured
-	 * segments as `seg`s; the bar's flexible space, so present even when empty.
+	 * `status` (role `omp.composer.extras`, `grow: 1`) of the active account and other
+	 * configured segments as `seg`s; the bar's flexible space, so present even when empty.
 	 */
 	readonly extras: NativeNode;
 	/** `text` (role `omp.composer.usage`): the session cost (empty when there is none). */
