@@ -52,6 +52,7 @@ const AUTO_APPLY_FOOTER_HINT = "↑/↓ navigate · space toggle · f failed · 
 
 const PROBE_COLUMNS: readonly TspPickerColumn[] = [
 	{ id: "latency", head: "Latency", format: "time", priority: 80, min: 6 },
+	{ id: "account", head: "Account", format: "text", priority: 90, min: 12 },
 	{ id: "status", head: "Status", format: "text", priority: 100, min: 10 },
 ];
 
@@ -83,7 +84,7 @@ function itemFieldsEqual(a: TspPickerItem, b: TspPickerItem): boolean {
 	const bFacts = b.facts;
 	if (aFacts !== bFacts) {
 		if (!aFacts || !bFacts) return false;
-		if (aFacts.latency !== bFacts.latency || aFacts.status !== bFacts.status) {
+		if (aFacts.latency !== bFacts.latency || aFacts.status !== bFacts.status || aFacts.account !== bFacts.account) {
 			return false;
 		}
 	}
@@ -493,8 +494,9 @@ export class ModelsProbePanelComponent implements Component {
 						: enabled
 							? theme.fg("success", "✓")
 							: theme.fg("dim", "·");
+			const account = result?.account ? theme.fg("muted", `  ${theme.icon.user} ${result.account}`) : "";
 			renderedRowStrings.push(
-				`${cursorMark} ${mark} ${selector}  ${resultStatus(result, this.#spinnerFrame, inFlight)}`,
+				`${cursorMark} ${mark} ${selector}${account}  ${resultStatus(result, this.#spinnerFrame, inFlight)}`,
 			);
 		}
 
@@ -577,6 +579,13 @@ export class ModelsProbePanelComponent implements Component {
 					: (result.error ?? "FAIL");
 		const status = rawStatus.replace(/[\x00-\x1F\x7F-\x9F]/g, " ").trim();
 		const facts: Record<string, string> = { latency, status };
+		const accountClean = result?.account?.replace(/[\x00-\x1F\x7F-\x9F]/g, " ").trim();
+		if (accountClean) {
+			facts.account = accountClean;
+		}
+		const badges = accountClean
+			? [{ text: accountClean, tone: "muted" as const, title: "Resolved Account" }]
+			: undefined;
 		const dot = !result
 			? inFlight
 				? ("accent" as const)
@@ -591,6 +600,7 @@ export class ModelsProbePanelComponent implements Component {
 			mono: true,
 			detail: model.name !== model.id ? model.name : undefined,
 			facts,
+			badges,
 			dot,
 			tone,
 		};
@@ -769,11 +779,12 @@ export class ModelsProbePanelComponent implements Component {
 			const result = this.#results[visible.modelIndex];
 			const selector = `${model.provider}/${model.id}`;
 			const latency = result ? ` (${formatLatency(result.latencyMs)})` : "";
+			const account = result?.account ? ` · ${result.account}` : "";
 			listItems.push(
 				node(
 					"item",
 					{
-						label: `${selector}${latency}`,
+						label: `${selector}${account}${latency}`,
 						disabled: result ? !result.ok : true,
 					},
 					undefined,

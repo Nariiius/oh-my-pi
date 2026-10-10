@@ -126,6 +126,54 @@ describe("createModelProbe across every API family", () => {
 		return result.ok;
 	}
 
+	test("attributes concurrent probes to the credentials sent, not the active account or API-key overrides", async () => {
+		const registry = {
+			resolver: (model: Model<Api>) => async () =>
+				model.id === "override"
+					? "override-key"
+					: { apiKey: `key-${model.id}`, credentialId: model.id === "ok" ? 1 : 2 },
+			authStorage: {
+				oauth: {
+					accounts: () => [
+						{ credentialId: 99, email: "wrong@example.com", active: true },
+						{ credentialId: 1, email: "saiere@gmail.com" },
+						{ credentialId: 2, accountId: "acct-123456" },
+					],
+				},
+			},
+		} as unknown as ModelRegistry;
+		const sent = new Map<string, string | null>();
+		const fetch: FetchImpl = async (_input, init) => {
+			const id = String(bodyOf(init).model);
+			sent.set(id, headerOf(init, "authorization"));
+			if (id === "failed") return new Response('{"error":{"message":"bad model"}}', { status: 400 });
+			return sseResponse([
+				{
+					id: "chatcmpl-1",
+					choices: [{ index: 0, delta: { role: "assistant", content: "OK" }, finish_reason: null }],
+				},
+				{ id: "chatcmpl-1", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+			]);
+		};
+		const probeModel = createModelProbe(registry, 5_000, fetch);
+		const [ok, failed, override] = await Promise.all(
+			["ok", "failed", "override"].map(id =>
+				probeModel(makeModel("openai-completions", id, "http://127.0.0.1:9/v1")),
+			),
+		);
+		expect(sent).toEqual(
+			new Map([
+				["ok", "Bearer key-ok"],
+				["failed", "Bearer key-failed"],
+				["override", "Bearer override-key"],
+			]),
+		);
+		expect(ok).toMatchObject({ ok: true, account: "saiere@gm" });
+		expect(failed).toMatchObject({ ok: false, account: "acct..56" });
+		expect(override).toMatchObject({ ok: true });
+		expect(override!.account).toBeUndefined();
+	});
+
 	test("openai-completions hits /chat/completions with Bearer auth and max_completion_tokens", async () => {
 		const seen: Array<{ url: string; body: Record<string, unknown>; auth: string | null }> = [];
 		const fetch: FetchImpl = async (input, init) => {

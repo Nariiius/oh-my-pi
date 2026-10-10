@@ -30,12 +30,13 @@ function makeModel(provider: string, id: string): Model<Api> {
 	}) as Model<Api>;
 }
 
-function resultFor(model: Model<Api>, ok: boolean, error?: string): ModelProbeResult {
+function resultFor(model: Model<Api>, ok: boolean, error?: string, account?: string): ModelProbeResult {
 	return {
 		provider: model.provider,
 		id: model.id,
 		selector: `${model.provider}/${model.id}`,
 		name: model.name,
+		account,
 		ok,
 		latencyMs: ok ? 1200 : 5000,
 		...(ok ? {} : { error: error ?? "timeout" }),
@@ -357,10 +358,10 @@ describe("ModelsProbePanelComponent", () => {
 		expect(panel.nativeSheet(fallbackCx)).toBe(false);
 	});
 
-	test("describes native picker with status, latency, and order", async () => {
+	test("describes native picker with status, latency, order, and custom account badges", async () => {
 		const models = [makeModel("prov-a", "works"), makeModel("prov-a", "dead")];
 		const probeModel: ProbeModelFn = async model =>
-			resultFor(model, model.id !== "dead", "400 bad model");
+			resultFor(model, model.id !== "dead", "400 bad model", model.id === "works" ? "sai@example.com" : undefined);
 
 		const { panel } = createHarness({ models, probeModel });
 		await flushMicrotasks();
@@ -383,17 +384,20 @@ describe("ModelsProbePanelComponent", () => {
 		expect(workingItem?.dot).toBe("success");
 		expect(workingItem?.facts?.latency).toBe("1.2s");
 		expect(workingItem?.facts?.status).toBe("OK");
+		expect(workingItem?.facts?.account).toBe("sai@example.com");
+		expect(workingItem?.badges).toEqual([{ text: "sai@example.com", tone: "muted", title: "Resolved Account" }]);
 
 		const deadItem = items.find(item => item.id === "prov-a/dead");
 		expect(deadItem).toBeDefined();
 		expect(deadItem?.dot).toBe("error");
 		expect(deadItem?.facts?.latency).toBe("5.0s");
 		expect(deadItem?.facts?.status).toBe("400 bad model");
+		expect(deadItem?.badges).toBeUndefined();
 	});
 
 	test("handles native select, activate, and action events", async () => {
 		const models = [makeModel("prov-a", "m1"), makeModel("prov-a", "m2"), makeModel("prov-a", "dead")];
-		const probeModel: ProbeModelFn = async model => resultFor(model, model.id !== "dead", "fail");
+		const probeModel: ProbeModelFn = async model => resultFor(model, model.id !== "dead", "fail", "user@test.org");
 
 		const { panel, onClose, requestRender } = createHarness({ models, probeModel });
 		await flushMicrotasks();
@@ -457,6 +461,34 @@ describe("ModelsProbePanelComponent", () => {
 
 		const node = panel.describe(fallbackCx);
 		expect(node.k).toBe("card");
+	});
+
+	test("preserves account updates across unpublished batches without retransmitting unchanged rows", async () => {
+		const models = [makeModel("prov-a", "m1"), makeModel("prov-a", "m2"), makeModel("prov-a", "m3")];
+		const pending = new Map(models.map(model => [model.id, Promise.withResolvers<ModelProbeResult>()]));
+		const { panel } = createHarness({
+			models,
+			nativeRendering: true,
+			probeModel: model => pending.get(model.id)!.promise,
+		});
+		await flushMicrotasks();
+		const wire = new Reconciler("probe");
+		const regions = { main: [], dock: [], layer: [panel] };
+		wire.reconcile(regions, pickerCx);
+
+		pending.get("m1")!.resolve(resultFor(models[0]!, true, undefined, "first\naccount"));
+		await flushMicrotasks();
+		vi.advanceTimersByTime(350);
+		// No TUI frame consumes this batch before the next result arrives.
+		pending.get("m2")!.resolve(resultFor(models[1]!, true, undefined, "second account"));
+		await flushMicrotasks();
+		vi.advanceTimersByTime(350);
+
+		const props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.itemsAdd?.find(item => item.id === "prov-a/m1")?.facts?.account).toBe("first account");
+		expect(props.itemsAdd?.find(item => item.id === "prov-a/m2")?.facts?.account).toBe("second account");
+		wire.reconcile(regions, pickerCx);
+		expect(wire.reconcile(regions, pickerCx)).toEqual([]);
 	});
 
 	test("maintains stable order and selection across probe completions", async () => {

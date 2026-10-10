@@ -21,7 +21,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { canonicalizeProvider, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
-import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
+import { formatCompactAccountEmail, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { ConfigError } from "../config/config-file";
 import { ModelRegistry } from "../config/model-registry";
@@ -464,6 +464,8 @@ export interface ModelProbeResult {
 	id: string;
 	selector: string;
 	name: string;
+	/** Compact identity of the account used by the final resolved credential, when known. */
+	account?: string;
 	ok: boolean;
 	/** Round-trip latency of the probe request, in milliseconds. */
 	latencyMs: number;
@@ -504,7 +506,9 @@ export function createModelProbe(
 			selector: `${model.provider}/${model.id}`,
 			name: model.name,
 		};
+		let account: string | undefined;
 		try {
+			const resolveApiKey = modelRegistry.resolver(model);
 			const response = await completeSimple(
 				model,
 				{
@@ -512,7 +516,18 @@ export function createModelProbe(
 					messages: [{ role: "user", content: "Reply with the single word OK.", timestamp: Date.now() }],
 				},
 				{
-					apiKey: modelRegistry.resolver(model),
+					apiKey: async context => {
+						account = undefined;
+						const resolved = await resolveApiKey(context);
+						if (resolved && typeof resolved !== "string" && resolved.credentialId !== undefined) {
+							const identity = modelRegistry.authStorage.oauth
+								.accounts(model.provider)
+								.find(candidate => candidate.credentialId === resolved.credentialId);
+							const email = identity?.email ?? identity?.accountId;
+							if (email) account = formatCompactAccountEmail(email);
+						}
+						return resolved;
+					},
 					maxTokens: 16,
 					disableReasoning: model.thinking?.requiresEffort ? false : true,
 					signal: signal
@@ -526,18 +541,19 @@ export function createModelProbe(
 			if (response.stopReason === "error" || response.errorMessage) {
 				return {
 					...base,
+					account,
 					ok: false,
 					latencyMs,
 					error: response.errorMessage ?? "provider returned an error",
 					errorStatus: response.errorStatus,
 				};
 			}
-			return { ...base, ok: true, latencyMs };
+			return { ...base, account, ok: true, latencyMs };
 		} catch (error) {
 			const latencyMs = Math.round(performance.now() - startedAt);
 			const message = error instanceof Error ? error.message : String(error);
 			const status = AIError.status(error);
-			return { ...base, ok: false, latencyMs, error: message, errorStatus: status ?? undefined };
+			return { ...base, account, ok: false, latencyMs, error: message, errorStatus: status ?? undefined };
 		}
 	};
 }
@@ -716,11 +732,12 @@ export async function runModelsProbeCore(options: ModelsProbeCoreOptions): Promi
 export function formatProbeResultsText(results: ModelProbeResult[], applied: boolean): string {
 	const lines = results.map(result => {
 		const latency = formatProbeLatency(result.latencyMs);
+		const account = result.account ? ` · ${result.account}` : "";
 		if (result.ok) {
-			return `  OK   ${result.selector} (${latency})`;
+			return `  OK   ${result.selector}${account} (${latency})`;
 		}
 		const status = result.errorStatus !== undefined ? `HTTP ${result.errorStatus}: ` : "";
-		return `  FAIL ${result.selector} (${latency}) — ${status}${result.error ?? "no response"}`;
+		return `  FAIL ${result.selector}${account} (${latency}) — ${status}${result.error ?? "no response"}`;
 	});
 
 	const working = results.filter(result => result.ok).length;
@@ -775,6 +792,7 @@ function toProbeJson(result: ModelProbeResult): Record<string, unknown> {
 		id: result.id,
 		selector: result.selector,
 		name: result.name,
+		account: result.account,
 		ok: result.ok,
 		latencyMs: result.latencyMs,
 		...(result.ok ? {} : { error: result.error, errorStatus: result.errorStatus }),
@@ -794,15 +812,16 @@ function renderProbeResults(results: ModelProbeResult[], json: boolean, applied:
 	}
 
 	for (const result of results) {
+		const account = result.account ? chalk.dim(` · ${result.account}`) : "";
 		if (result.ok) {
 			writeLine(
-				`  ${chalk.green("OK")}   ${result.selector} ${chalk.dim(`(${formatProbeLatency(result.latencyMs)})`)}`,
+				`  ${chalk.green("OK")}   ${result.selector}${account} ${chalk.dim(`(${formatProbeLatency(result.latencyMs)})`)}`,
 			);
 			continue;
 		}
 		const status = result.errorStatus !== undefined ? `HTTP ${result.errorStatus}: ` : "";
 		writeLine(
-			`  ${chalk.red("FAIL")} ${result.selector} ${chalk.dim(`(${formatProbeLatency(result.latencyMs)})`)} — ${status}${result.error ?? "no response"}`,
+			`  ${chalk.red("FAIL")} ${result.selector}${account} ${chalk.dim(`(${formatProbeLatency(result.latencyMs)})`)} — ${status}${result.error ?? "no response"}`,
 		);
 	}
 
