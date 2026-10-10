@@ -132,3 +132,16 @@ export function formatPercent(ratio: number): string {
 export function normalizePremiumRequests(value: number): number {
 	return Math.round((value + Number.EPSILON) * 100) / 100;
 }
+
+/** Compact an account email or ID for status displays. */
+export function formatCompactAccountEmail(email: string): string {
+	const atIndex = email.indexOf("@");
+	if (atIndex === -1) {
+		return email.length > 8 ? `${email.slice(0, 4)}..${email.slice(-2)}` : email;
+	}
+	const user = email.slice(0, atIndex);
+	const domain = email.slice(atIndex + 1);
+	const userShort = user.length > 6 ? `${user.slice(0, 3)}${user.slice(-3)}` : user;
+	const domainShort = domain.slice(0, 2);
+	return `${userShort}@${domainShort}`;
+}

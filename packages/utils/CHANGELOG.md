@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `formatCompactAccountEmail` for consistent compact account labels across status and probe displays.
+
 ## [18.8.1] - 2026-10-07
 
 ### Added

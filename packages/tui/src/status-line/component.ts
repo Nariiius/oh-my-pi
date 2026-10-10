@@ -18,7 +18,14 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
-import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
+import {
+	adjustHsv,
+	formatCompactAccountEmail,
+	formatNumber,
+	getProjectDir,
+	hexToRgb,
+	rgbToHex,
+} from "@oh-my-pi/pi-utils";
 import type {
 	ActiveRepoContext,
 	StatusAccountIdentity as OAuthAccountIdentity,
@@ -420,6 +427,7 @@ class StatusLineExternalInputs {
 	modelId: string | undefined = undefined;
 	modelName: string | undefined = undefined;
 	modelProvider: string | undefined = undefined;
+	activeAccountLabel: string | undefined = undefined;
 	modelContextWindow: Model["contextWindow"] | undefined = undefined;
 	modelThinking: Model["thinking"] = undefined;
 	thinkingLevel: unknown = undefined;
@@ -2656,6 +2664,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		target.modelId = model?.id;
 		target.modelName = model?.name;
 		target.modelProvider = model?.provider;
+		target.activeAccountLabel = this.#activeAccountLabel();
 		target.modelContextWindow = model?.contextWindow;
 		target.modelThinking = model?.thinking;
 		target.thinkingLevel = state.thinkingLevel;
@@ -2714,6 +2723,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			left.modelId === right.modelId &&
 			left.modelName === right.modelName &&
 			left.modelProvider === right.modelProvider &&
+			left.activeAccountLabel === right.activeAccountLabel &&
 			left.modelContextWindow === right.modelContextWindow &&
 			left.modelThinking === right.modelThinking &&
 			left.thinkingLevel === right.thinkingLevel &&
@@ -3485,7 +3495,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			return memo.facts;
 		}
 		this.#nativeInputsProbe = new StatusLineExternalInputs();
-		const built = this.#buildComposerFacts(effectiveSettings, nowMs);
+		const built = this.#buildComposerFacts(effectiveSettings, nowMs, probe.activeAccountLabel);
 		const fingerprint = JSON.stringify(built, withoutAges);
 		this.#nativeMemo = {
 			facts: memo?.fingerprint === fingerprint ? memo.facts : built,
@@ -3527,7 +3537,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 	}
 
-	#buildComposerFacts(effectiveSettings: EffectiveStatusLineSettings, nowMs: number): ComposerFacts {
+	#buildComposerFacts(
+		effectiveSettings: EffectiveStatusLineSettings,
+		nowMs: number,
+		accountLabel: string | undefined,
+	): ComposerFacts {
 		const { leftSegments, rightSegments } = effectiveSettings;
 		const segments = [...leftSegments, ...rightSegments];
 		// Tern's pane header shows the path and branch from the pane's cwd; only the PR is looked up here.
@@ -3547,6 +3561,16 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 		const dim = this.#focusedAgentId !== undefined;
 		const facts: NativeNode[] = [];
+		if (accountLabel) {
+			facts.push(
+				describeSeg(
+					"account",
+					{ role: "omp.composer.fact", priority: segments.length + 1 },
+					{ spans: [span(accountLabel)], icon: "user" },
+					dim,
+				),
+			);
+		}
 		const collect = (side: "left" | "right", ids: readonly StatusLineSegmentId[]): void => {
 			ids.forEach((id, index) => {
 				if (COMPOSER_HOMED_SEGMENTS[id]) return;
@@ -3648,9 +3672,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			...ctx,
 			options: { ...ctx.options, model: { ...ctx.options.model, showThinkingLevel: false } },
 		};
+		const model = describeSegment("model", modelCtx) ?? { spans: [] };
+		const provider = this.session.state.model?.provider;
+		const name = model.spans[0];
+		if (provider && name && !name.t.startsWith(`${provider}/`)) name.t = `${provider}/${name.t}`;
 		return {
 			context,
-			model: describeSegment("model", modelCtx) ?? { spans: [] },
+			model,
 			extras: node("status", { role: "omp.composer.extras", transparent: true, grow: 1 }, facts, "extras"),
 			usage,
 		};
@@ -3773,17 +3801,20 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return lines;
 	}
 
-	/** Compact format for account email: user (first 3 + last 3 if long) + @ + domain prefix. */
-	#formatCompactAccountEmail(email: string): string {
-		const atIndex = email.indexOf("@");
-		if (atIndex === -1) {
-			return email.length > 8 ? `${email.slice(0, 4)}..${email.slice(-2)}` : email;
+	#activeAccountLabel(): string | undefined {
+		const provider = this.session.state.model?.provider;
+		if (
+			provider !== "google-antigravity" &&
+			provider !== "google" &&
+			provider !== "gemini" &&
+			provider !== "openai-codex" &&
+			provider !== "openai"
+		) {
+			return undefined;
 		}
-		const user = email.slice(0, atIndex);
-		const domain = email.slice(atIndex + 1);
-		const userShort = user.length > 6 ? `${user.slice(0, 3)}${user.slice(-3)}` : user;
-		const domainShort = domain.slice(0, 2);
-		return `${userShort}@${domainShort}`;
+		const identity = this.host.activeAccount(this.session, provider);
+		const email = identity?.email ?? identity?.accountId;
+		return email ? formatCompactAccountEmail(email) : undefined;
 	}
 
 	/** Pi-style two-line footer: path line, then cost/context left + model right. */
@@ -3809,23 +3840,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const model = this.session.state.model;
 		const provider = model?.provider;
 
-		let accountStr = "";
-		if (provider) {
-			const isGeminiOrOpenAi =
-				provider === "google-antigravity" ||
-				provider === "google" ||
-				provider === "gemini" ||
-				provider === "openai-codex" ||
-				provider === "openai";
-			if (isGeminiOrOpenAi) {
-				const activeIdentity = this.host.activeAccount(this.session, provider);
-				const email = activeIdentity?.email ?? activeIdentity?.accountId;
-				if (email) {
-					const userIcon = theme.icon.user ? `${theme.icon.user} ` : "";
-					accountStr = `${theme.sep.dot}${userIcon}${this.#formatCompactAccountEmail(email)}`;
-				}
-			}
-		}
+		const accountLabel = this.#activeAccountLabel();
+		const userIcon = theme.icon.user ? `${theme.icon.user} ` : "";
+		const accountStr = accountLabel ? `${theme.sep.dot}${userIcon}${accountLabel}` : "";
 
 		const folderIcon = theme.icon.folder ? `${theme.icon.folder} ` : "";
 		const pathText = folderIcon + pwd + accountStr;
@@ -3865,7 +3882,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const rawName = model?.name ?? model?.id ?? "Unknown";
 		const mn = provider && !rawName.startsWith(`${provider}/`) ? `${provider}/${rawName}` : rawName;
 		const modelIcon = theme.icon.model ? `${theme.icon.model} ` : "";
-		const sessionWithConfigured = this.session as unknown as { configuredThinkingLevel?: () => ThinkingLevel | undefined };
+		const sessionWithConfigured = this.session as unknown as {
+			configuredThinkingLevel?: () => ThinkingLevel | undefined;
+		};
 		const tl = sessionWithConfigured.configuredThinkingLevel?.() ?? this.session.state.thinkingLevel;
 		const thinkingGlyph =
 			tl !== undefined && (tl as string) !== ThinkingLevel.Off

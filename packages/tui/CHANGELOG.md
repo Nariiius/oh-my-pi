@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Show the model provider and compact active-account identity in the native Tern composer, refreshing the account label when credentials rotate.
+
 ## [18.8.2] - 2026-10-07
 
 ### Removed

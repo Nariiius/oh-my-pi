@@ -332,6 +332,66 @@ describe("StatusLineComponent effective settings cache", () => {
 	});
 });
 
+describe("StatusLineComponent native account status", () => {
+	it("shows the provider and compact account, updating when the account rotates or disappears", () => {
+		const session = makeSession();
+		Object.assign(session.state.model!, { provider: "google-antigravity", name: "Gemini 3.8 Flash" });
+		let identity: { email: string } | undefined = { email: "saiere@gmail.com" };
+		const component = statusLines.track(
+			new StatusLineComponent(session, { ...statusLineHost, activeAccount: () => identity }),
+		);
+		component.updateSettings({ preset: "custom", leftSegments: [], rightSegments: [] });
+		component.setTwoLineFooter(true);
+		const accountLabel = () =>
+			(component.describeComposerFacts().extras.c ?? [])
+				.flatMap(child =>
+					"k" in child && child.k === "seg" && child.key === "account"
+						? (child.p?.spans?.map(part => part.t) ?? [])
+						: [],
+				)
+				.join("");
+
+		expect(
+			component
+				.describeComposerFacts()
+				.model.spans.map(part => part.t)
+				.join(""),
+		).toBe("google-antigravity/Gemini 3.8 Flash");
+		expect(accountLabel()).toBe("saiere@gm");
+		const footer = component
+			.getPreviewLines(200, { statusAttachment: "none", bottomBar: "full" })
+			.map(stripVTControlCharacters)
+			.join("\n");
+		expect(footer).toContain("google-antigravity/Gemini 3.8 Flash");
+		expect(footer).toContain("saiere@gm");
+
+		identity = { email: "alternate@example.com" };
+		expect(accountLabel()).toBe("altate@ex");
+		identity = undefined;
+		expect(accountLabel()).toBe("");
+	});
+
+	it("avoids duplicate provider prefixes and falls back to the account ID only for supported providers", () => {
+		const session = makeSession();
+		Object.assign(session.state.model!, { provider: "openai-codex", name: "openai-codex/GPT" });
+		const component = statusLines.track(
+			new StatusLineComponent(session, { ...statusLineHost, activeAccount: () => ({ accountId: "acct-123456" }) }),
+		);
+		component.updateSettings({ preset: "custom", leftSegments: [], rightSegments: [] });
+		const facts = component.describeComposerFacts();
+		expect(facts.model.spans.map(part => part.t).join("")).toBe("openai-codex/GPT");
+		const account = facts.extras.c?.find(child => "k" in child && child.key === "account");
+		expect(
+			account && "k" in account && account.k === "seg" ? account.p?.spans?.map(part => part.t).join("") : "",
+		).toBe("acct..56");
+
+		Object.assign(session.state.model!, { provider: "anthropic", name: "Claude Sonnet" });
+		expect(component.describeComposerFacts().extras.c?.some(child => "k" in child && child.key === "account")).toBe(
+			false,
+		);
+	});
+});
+
 describe("StatusLineComponent hook statuses", () => {
 	it("renders every keyed status on a deterministic line", () => {
 		const component = makeComponent({ showHookStatus: true });
