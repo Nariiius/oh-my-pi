@@ -1020,7 +1020,11 @@ describe("parseSkillInvocation", () => {
 		const isSkill = (name: string) => name === "humanizer" || name === "reviewer";
 
 		it("parses direct slash command when isSkillName returns true", () => {
-			expect(parseSkillInvocation("/humanizer", isSkill)).toEqual({ name: "humanizer", args: "", prompt: "/humanizer" });
+			expect(parseSkillInvocation("/humanizer", isSkill)).toEqual({
+				name: "humanizer",
+				args: "",
+				prompt: "/humanizer",
+			});
 			expect(parseSkillInvocation("/humanizer please edit this", isSkill)).toEqual({
 				name: "humanizer",
 				args: "please edit this",

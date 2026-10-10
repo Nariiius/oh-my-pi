@@ -184,8 +184,7 @@ export function calculateUsageCost(cost: ModelCost, usage: Usage, timestamp?: nu
 	usage.cost.input = (rates.input / 1000000) * (usage.input + (orchestration?.input ?? 0)) * multiplier;
 	usage.cost.output = (rates.output / 1000000) * (usage.output + (orchestration?.output ?? 0)) * multiplier;
 	const cacheReadRate = rates.cacheRead > 0 ? rates.cacheRead : rates.input > 0 ? rates.input * 0.5 : 0;
-	usage.cost.cacheRead =
-		(cacheReadRate / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0)) * multiplier;
+	usage.cost.cacheRead = (cacheReadRate / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0)) * multiplier;
 	usage.cost.cacheWrite = cacheWriteCost(rates, usage) * multiplier;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	return usage.cost;
