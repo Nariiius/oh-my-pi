@@ -10669,6 +10669,19 @@ export class AgentSession implements SettingsScope {
 	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
+		// OAuth affinity is what the status line displays, and it only changes when
+		// the shared resolver serves a request. Select the account that can serve
+		// this model before notifying subscribers so the redraw is not one model
+		// behind. Overrides suppress OAuth, so API-key switches stay deferred;
+		// a refresh or usage lookup can happen here, but no model request is sent.
+		// A failure leaves the current model and affinity untouched.
+		if (isChanging && this.#modelRegistry.isUsingOAuth(model)) {
+			await this.#modelRegistry.authStorage.oauth.access(model.provider, this.sessionId, {
+				baseUrl: model.baseUrl,
+				modelId: model.id,
+				accountIds: model.accountAccess && Object.keys(model.accountAccess),
+			});
+		}
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 			if (isChanging) {

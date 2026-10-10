@@ -11,6 +11,7 @@
 - Publish native model-probe results in stable batches so unrelated redraws cannot interrupt failed-row removal; keep navigation and toggles on the highlighted model as rows disappear.
 - Attach pasted file paths as atomic composer chips with filename/path cards in terminal and Tern native input, using existing file ingestion on submit and preserving removal, undo, and cleared-draft recall.
 - Show the compact account identity used by each model probe alongside its provider/model in the probe panel, text reports, and JSON output; concurrent probes and credential rotation retain per-request attribution.
+- Refresh the displayed OAuth account when switching models, before the status line redraws, without sending a model request. API-key switches stay deferred, and a failed account selection leaves the current model unchanged.
 
 ## [18.8.3] - 2026-10-07
 
