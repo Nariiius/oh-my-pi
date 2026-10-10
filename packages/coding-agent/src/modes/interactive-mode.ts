@@ -1906,7 +1906,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.proseOnlyThinking = cfgProseOnlyThinking.get(settings);
 		this.expandThinkingBlocks = cfgExpandThinkingBlocks.get(settings);
 
-
 		// Store pending commands for init() where file commands are loaded async
 		this.#pendingSlashCommands = this.#buildPendingSlashCommands();
 
@@ -2594,7 +2593,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	async refreshSkillState(): Promise<void> {
 		// The session's command-metadata notification rebuilds the picker.
 		await this.session.refreshSkills();
-
 	}
 
 	/** Reload slash commands and autocomplete for the provided working directory. */
@@ -2662,7 +2660,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			basePath,
 		);
 		this.#applyAutocompleteProvider();
-
 	}
 
 	/**
@@ -7312,7 +7309,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		return components;
 	}
-
 
 	#clearWorkingMessageAccentCache(): void {
 		this.#workingMessageAccentCacheKey = undefined;

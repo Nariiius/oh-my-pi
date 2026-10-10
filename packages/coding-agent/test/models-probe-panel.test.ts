@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -8,9 +8,12 @@ import {
 	type ModelsProbePanelCallbacks,
 	ModelsProbePanelComponent,
 } from "@oh-my-pi/pi-coding-agent/modes/components/models-probe-panel";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { TUI } from "@oh-my-pi/pi-tui";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
+import { Reconciler } from "@oh-my-pi/pi-tui/native/reconcile";
+import type { TspPickerProps } from "@oh-my-pi/pi-wire";
 
 function makeModel(provider: string, id: string): Model<Api> {
 	return buildModel({
@@ -39,12 +42,29 @@ function resultFor(model: Model<Api>, ok: boolean, error?: string): ModelProbeRe
 	};
 }
 
+const pickerCx: DescribeContext = {
+	cols: 100,
+	reduceMotion: false,
+	dark: true,
+	supports: kind => kind === "picker",
+	feature: () => true,
+};
+
+const fallbackCx: DescribeContext = {
+	cols: 100,
+	reduceMotion: false,
+	dark: true,
+	supports: () => false,
+	feature: () => false,
+};
+
 /** Flush the microtask chain runModelProbes' workers settle on. */
 async function flushMicrotasks(): Promise<void> {
 	for (let i = 0; i < 8; i += 1) await Promise.resolve();
 }
 
-let testTheme: Awaited<ReturnType<typeof getThemeByName>>;
+let testTheme: Theme | undefined;
+const panels = new Set<ModelsProbePanelComponent>();
 
 function installTestTheme(): void {
 	if (!testTheme) {
@@ -58,10 +78,12 @@ function createHarness(options: {
 	autoApply?: boolean;
 	probeModel?: ProbeModelFn;
 	rows?: number;
+	nativeRendering?: boolean;
 }) {
 	const requestRender = vi.fn();
 	const tui = {
 		requestRender,
+		nativeRendering: options.nativeRendering ?? false,
 		terminal: { rows: options.rows ?? 40 },
 	} as unknown as TUI;
 	const onClose = vi.fn(async () => {});
@@ -77,6 +99,7 @@ function createHarness(options: {
 		},
 		callbacks,
 	);
+	panels.add(panel);
 	return { tui, requestRender, onClose, panel };
 }
 
@@ -88,6 +111,13 @@ describe("ModelsProbePanelComponent", () => {
 	beforeEach(async () => {
 		testTheme = await getThemeByName("dark");
 		installTestTheme();
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		for (const panel of panels) panel.dispose();
+		panels.clear();
+		vi.useRealTimers();
 	});
 
 	test("separates working rows from a collapsed failed summary", async () => {
@@ -194,10 +224,7 @@ describe("ModelsProbePanelComponent", () => {
 	});
 
 	test("dispose stops later results from applying or rendering", async () => {
-		let release!: () => void;
-		const gate = new Promise<void>(resolve => {
-			release = resolve;
-		});
+		const { promise: gate, resolve: release } = Promise.withResolvers<void>();
 		const { panel, requestRender, onClose } = createHarness({
 			models: [makeModel("prov-a", "works"), makeModel("prov-a", "dead")],
 			probeModel: async model => {
@@ -247,10 +274,7 @@ describe("ModelsProbePanelComponent", () => {
 	});
 
 	test("shows queued and in-flight states before results arrive", async () => {
-		let finishSecond!: () => void;
-		const gate = new Promise<void>(resolve => {
-			finishSecond = resolve;
-		});
+		const { promise: gate, resolve: finishSecond } = Promise.withResolvers<void>();
 		const { panel } = createHarness({
 			models: [makeModel("prov-a", "m1"), makeModel("prov-a", "m2")],
 			probeModel: async model => {
@@ -323,6 +347,359 @@ describe("ModelsProbePanelComponent", () => {
 		const text = normalize(panel.render(100));
 		expect(text).toContain("Probe Models");
 		expect(text).toContain("prov-a/m1");
+	});
+
+	test("nativeSheet reflects picker capability", () => {
+		const { panel } = createHarness({
+			models: [makeModel("prov-a", "m1")],
+		});
+		expect(panel.nativeSheet(pickerCx)).toBe(true);
+		expect(panel.nativeSheet(fallbackCx)).toBe(false);
+	});
+
+	test("describes native picker with status, latency, and order", async () => {
+		const models = [makeModel("prov-a", "works"), makeModel("prov-a", "dead")];
+		const probeModel: ProbeModelFn = async model =>
+			resultFor(model, model.id !== "dead", "400 bad model");
+
+		const { panel } = createHarness({ models, probeModel });
+		await flushMicrotasks();
+
+		const node = panel.describe(pickerCx);
+		expect(node.k).toBe("picker");
+		const props = node.p as unknown as TspPickerProps;
+		expect(props.title).toBe("Probe Models");
+		expect(props.noun).toBe("models");
+		expect(props.icon).toBe("cpu");
+		expect(props.total).toBe(2);
+		expect(props.subtitle).toContain("1 working, 1 failed");
+		expect(props.current).toEqual(["prov-a/works"]);
+		expect(props.selected).toBe("prov-a/works");
+		// By default in native mode, failed models automatically disappear from order
+		expect(props.order).toEqual(["prov-a/works"]);
+		const items = props.items ?? [];
+		const workingItem = items.find(item => item.id === "prov-a/works");
+		expect(workingItem).toBeDefined();
+		expect(workingItem?.dot).toBe("success");
+		expect(workingItem?.facts?.latency).toBe("1.2s");
+		expect(workingItem?.facts?.status).toBe("OK");
+
+		const deadItem = items.find(item => item.id === "prov-a/dead");
+		expect(deadItem).toBeDefined();
+		expect(deadItem?.dot).toBe("error");
+		expect(deadItem?.facts?.latency).toBe("5.0s");
+		expect(deadItem?.facts?.status).toBe("400 bad model");
+	});
+
+	test("handles native select, activate, and action events", async () => {
+		const models = [makeModel("prov-a", "m1"), makeModel("prov-a", "m2"), makeModel("prov-a", "dead")];
+		const probeModel: ProbeModelFn = async model => resultFor(model, model.id !== "dead", "fail");
+
+		const { panel, onClose, requestRender } = createHarness({ models, probeModel });
+		await flushMicrotasks();
+
+		// Initial describe: m1 and m2 enabled
+		let props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.current).toEqual(["prov-a/m1", "prov-a/m2"]);
+		expect(props.selected).toBe("prov-a/m1");
+
+		// 1. Select event moves cursor without toggling enablement
+		panel.handleNativeEvent({ type: "select", key: "", item: "prov-a/m2" });
+		expect(requestRender).toHaveBeenCalled();
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.selected).toBe("prov-a/m2");
+		expect(props.current).toEqual(["prov-a/m1", "prov-a/m2"]);
+
+		// 2. Activate event on working model toggles enablement
+		panel.handleNativeEvent({ type: "activate", key: "", item: "prov-a/m2" });
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.current).toEqual(["prov-a/m1"]);
+
+		// Activate again re-enables
+		panel.handleNativeEvent({ type: "activate", key: "", item: "prov-a/m2" });
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.current).toEqual(["prov-a/m1", "prov-a/m2"]);
+
+		// 3. Action "failed" reveals failures in order
+		panel.handleNativeEvent({ type: "action", key: "", act: "failed", mods: [] });
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual(["prov-a/m1", "prov-a/m2", "prov-a/dead"]);
+		expect(props.actions?.find(a => a.id === "failed")?.label).toBe("Hide failed (1)");
+
+		// Action "failed" again resumes automatic filtering (hides failures)
+		panel.handleNativeEvent({ type: "action", key: "", act: "failed", mods: [] });
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual(["prov-a/m1", "prov-a/m2"]);
+		expect(props.actions?.find(a => a.id === "failed")?.label).toBe("Show failed (1)");
+		// 4. Action "toggle" toggles current cursor model
+		panel.handleNativeEvent({ type: "action", key: "", act: "toggle", mods: [] });
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.current).toEqual(["prov-a/m1"]);
+
+		// 5. Action "apply" closes with enabled selectors
+		panel.handleNativeEvent({ type: "action", key: "", act: "apply", mods: [] });
+		await flushMicrotasks();
+		expect(onClose).toHaveBeenCalledWith(["prov-a/m1"]);
+
+		// 6. Action "close" closes with null
+		const harness2 = createHarness({ models, probeModel });
+		await flushMicrotasks();
+		harness2.panel.handleNativeEvent({ type: "action", key: "", act: "close", mods: [] });
+		await flushMicrotasks();
+		expect(harness2.onClose).toHaveBeenCalledWith(null);
+	});
+
+	test("falls back to card when picker is unsupported", async () => {
+		const { panel } = createHarness({
+			models: [makeModel("prov-a", "m1")],
+		});
+		await flushMicrotasks();
+
+		const node = panel.describe(fallbackCx);
+		expect(node.k).toBe("card");
+	});
+
+	test("maintains stable order and selection across probe completions", async () => {
+		const models = [makeModel("prov-a", "m1"), makeModel("prov-a", "m2"), makeModel("prov-a", "m3")];
+		const { promise: p3, resolve: r3 } = Promise.withResolvers<ModelProbeResult>();
+		const probeModel: ProbeModelFn = async model => {
+			if (model.id === "m3") return p3;
+			return resultFor(model, true);
+		};
+
+		const { panel } = createHarness({ models, probeModel });
+		await flushMicrotasks();
+
+		panel.describe(pickerCx);
+		// User explicitly selects m2
+		panel.handleNativeEvent({ type: "select", key: "", item: "prov-a/m2" });
+		const first = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(first.selected).toBe("prov-a/m2");
+		const firstOrder = first.order;
+
+		// When m3 finishes successfully, order and selected remain unchanged
+		r3(resultFor(models[2]!, true));
+		await flushMicrotasks();
+		vi.advanceTimersByTime(350);
+
+		const second = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(second.selected).toBe("prov-a/m2");
+		expect(second.order).toEqual(firstOrder);
+	});
+
+	test("publishes bounded native batches despite unrelated frames, selection, and final completion", async () => {
+		const models = ["m1", "m2", "m3", "m4"].map(id => makeModel("prov-a", id));
+		const pending = new Map(models.map(model => [model.id, Promise.withResolvers<ModelProbeResult>()]));
+		const { panel } = createHarness({
+			models,
+			nativeRendering: true,
+			probeModel: model => pending.get(model.id)!.promise,
+		});
+		await flushMicrotasks();
+		const wire = new Reconciler("probe");
+		const regions = { main: [], dock: [], layer: [panel] };
+		wire.reconcile(regions, pickerCx);
+		const initialOrder = models.map(model => `prov-a/${model.id}`);
+
+		pending.get("m1")!.resolve(resultFor(models[0]!, false));
+		await flushMicrotasks();
+		expect(wire.reconcile(regions, pickerCx)).toEqual([]);
+		panel.handleNativeEvent({ type: "select", key: "", item: "prov-a/m2" });
+		const selectionFrame = wire.reconcile(regions, pickerCx);
+		expect(selectionFrame.some(op => op[0] === "set" && op[2].order !== undefined)).toBe(false);
+		vi.advanceTimersByTime(200);
+		pending.get("m2")!.resolve(resultFor(models[1]!, false));
+		await flushMicrotasks();
+		expect((panel.describe(pickerCx).p as unknown as TspPickerProps).order).toEqual(initialOrder);
+		expect(wire.reconcile(regions, pickerCx)).toEqual([]);
+
+		vi.advanceTimersByTime(150);
+		let props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual(["prov-a/m3", "prov-a/m4"]);
+		expect(props.selected).toBe("prov-a/m3");
+		wire.reconcile(regions, pickerCx);
+
+		pending.get("m3")!.resolve(resultFor(models[2]!, true));
+		pending.get("m4")!.resolve(resultFor(models[3]!, false));
+		await flushMicrotasks();
+		vi.advanceTimersByTime(349);
+		expect(wire.reconcile(regions, pickerCx)).toEqual([]);
+		vi.advanceTimersByTime(1);
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual(["prov-a/m3"]);
+		expect(props.current).toEqual(["prov-a/m3"]);
+		expect(props.selected).toBe("prov-a/m3");
+	});
+
+	test("automatic failure removal: 1,431 models with 1,192 failures removes failures automatically", async () => {
+		const models = Array.from({ length: 1431 }, (_, i) => makeModel("prov-a", `model-${i}`));
+		const failures = new Set(Array.from({ length: 1192 }, (_, i) => `model-${i}`));
+		const probeModel: ProbeModelFn = async model =>
+			resultFor(model, !failures.has(model.id), failures.has(model.id) ? "500 server error" : undefined);
+
+		const { panel } = createHarness({ models, probeModel });
+		const initial = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(initial.order?.length).toBe(1431);
+		expect(initial.selected).toBe("prov-a/model-0");
+
+		while (panel.getResults().filter(Boolean).length < 1431) {
+			await Promise.resolve();
+		}
+		await flushMicrotasks();
+		vi.advanceTimersByTime(350);
+
+		const afterProbing = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		// Failed models automatically disappeared: exactly 239 nonfailed models remain visible
+		expect(afterProbing.order?.length).toBe(239);
+		expect(afterProbing.order?.includes("prov-a/model-0")).toBe(false); // model-0 failed and was removed
+		expect(afterProbing.total).toBe(1431);
+		expect(afterProbing.subtitle).toContain("239 working, 1192 failed");
+		// Selection never references a hidden item
+		expect(afterProbing.order?.includes(afterProbing.selected!)).toBe(true);
+
+		// Catalogue still holds all items for F toggle or inspection
+		expect(afterProbing.items?.length).toBe(1431);
+	});
+
+	test("failure visibility toggle reveals failures and resumes automatic filtering", async () => {
+		const models = [
+			makeModel("prov-a", "m1"),
+			makeModel("prov-a", "m2"),
+			makeModel("prov-a", "m3"),
+			makeModel("prov-a", "m4"),
+			makeModel("prov-a", "m5"),
+		];
+		const r3 = Promise.withResolvers<ModelProbeResult>();
+		const r4 = Promise.withResolvers<ModelProbeResult>();
+		const probeModel: ProbeModelFn = async model => {
+			if (model.id === "m1") return resultFor(model, true);
+			if (model.id === "m2") return resultFor(model, false, "400 error");
+			if (model.id === "m3") return r3.promise;
+			if (model.id === "m4") return r4.promise;
+			return resultFor(model, true);
+		};
+
+		const { panel } = createHarness({ models, probeModel });
+		await flushMicrotasks();
+
+		// Default: m2 failed and disappeared automatically
+		let props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual(["prov-a/m1", "prov-a/m3", "prov-a/m4", "prov-a/m5"]);
+		expect(props.actions?.find(a => a.id === "failed")?.label).toBe("Show failed (1)");
+
+		// Press F to reveal all failures
+		panel.handleNativeEvent({ type: "action", key: "", act: "failed", mods: [] });
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual(["prov-a/m1", "prov-a/m2", "prov-a/m3", "prov-a/m4", "prov-a/m5"]);
+		expect(props.actions?.find(a => a.id === "failed")?.label).toBe("Hide failed (1)");
+
+		// m3 fails while failures are shown: m3 remains visible
+		r3.resolve(resultFor(models[2]!, false, "500 error"));
+		await flushMicrotasks();
+		vi.advanceTimersByTime(350);
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual(["prov-a/m1", "prov-a/m2", "prov-a/m3", "prov-a/m4", "prov-a/m5"]);
+		expect(props.actions?.find(a => a.id === "failed")?.label).toBe("Hide failed (2)");
+
+		// Press F again: resumes automatic filtering, hiding both m2 and m3
+		panel.handleNativeEvent({ type: "action", key: "", act: "failed", mods: [] });
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual(["prov-a/m1", "prov-a/m4", "prov-a/m5"]);
+		expect(props.actions?.find(a => a.id === "failed")?.label).toBe("Show failed (2)");
+
+		// Subsequent failure (m4) also disappears automatically
+		r4.resolve(resultFor(models[3]!, false, "404 not found"));
+		await flushMicrotasks();
+		vi.advanceTimersByTime(350);
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual(["prov-a/m1", "prov-a/m5"]);
+		expect(props.actions?.find(a => a.id === "failed")?.label).toBe("Show failed (3)");
+	});
+
+	test("preserves nearest surviving visible selection when selected model fails", async () => {
+		const models = [
+			makeModel("prov-a", "m1"),
+			makeModel("prov-a", "m2"),
+			makeModel("prov-a", "m3"),
+			makeModel("prov-a", "m4"),
+		];
+		const r2 = Promise.withResolvers<ModelProbeResult>();
+		const probeModel: ProbeModelFn = async model => {
+			if (model.id === "m2") return r2.promise;
+			return resultFor(model, true);
+		};
+
+		const { panel } = createHarness({ models, probeModel });
+		await flushMicrotasks();
+
+		panel.describe(pickerCx);
+		// User explicitly highlights m2
+		panel.handleNativeEvent({ type: "select", key: "", item: "prov-a/m2" });
+		let props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.selected).toBe("prov-a/m2");
+
+		// m2 fails and is removed from order
+		r2.resolve(resultFor(models[1]!, false, "500 crash"));
+		await flushMicrotasks();
+		vi.advanceTimersByTime(350);
+
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual(["prov-a/m1", "prov-a/m3", "prov-a/m4"]);
+		// Selection must anchor to the nearest surviving neighbor (m3), NOT reset to m1!
+		expect(props.selected).toBe("prov-a/m3");
+	});
+
+	test("native actions and keyboard navigation target the selected model after earlier rows disappear", async () => {
+		const models = ["m1", "m2", "m3"].map(id => makeModel("prov-a", id));
+		const first = Promise.withResolvers<ModelProbeResult>();
+		const { panel, onClose } = createHarness({
+			models,
+			nativeRendering: true,
+			probeModel: model => (model.id === "m1" ? first.promise : Promise.resolve(resultFor(model, true))),
+		});
+		await flushMicrotasks();
+		panel.describe(pickerCx);
+		panel.handleNativeEvent({ type: "select", key: "", item: "prov-a/m2" });
+		first.resolve(resultFor(models[0]!, false));
+		await flushMicrotasks();
+		vi.advanceTimersByTime(350);
+		expect((panel.describe(pickerCx).p as unknown as TspPickerProps).selected).toBe("prov-a/m2");
+
+		panel.handleNativeEvent({ type: "action", key: "", act: "toggle", mods: [] });
+		expect((panel.describe(pickerCx).p as unknown as TspPickerProps).current).toEqual(["prov-a/m3"]);
+		panel.handleInput("\x1b[B");
+		panel.handleInput(" ");
+		expect((panel.describe(pickerCx).p as unknown as TspPickerProps).current).toEqual([]);
+		panel.handleInput("\x1b[A");
+		panel.handleInput(" ");
+		panel.handleInput("f");
+		panel.handleInput("\x1b[H");
+		expect((panel.describe(pickerCx).p as unknown as TspPickerProps).selected).toBe("prov-a/m1");
+		panel.handleNativeEvent({ type: "activate", key: "", item: "prov-a/m1" });
+		expect((panel.describe(pickerCx).p as unknown as TspPickerProps).current).toEqual(["prov-a/m2"]);
+		panel.handleInput("\x1b[F");
+		panel.handleInput(" ");
+		panel.handleInput("\r");
+		await flushMicrotasks();
+		expect(onClose).toHaveBeenCalledWith(["prov-a/m2", "prov-a/m3"]);
+	});
+
+	test("an all-failed native batch clears selection and remains revealable", async () => {
+		const { panel, onClose } = createHarness({ models: [makeModel("prov-a", "dead")], nativeRendering: true });
+		panel.describe(pickerCx);
+		await flushMicrotasks();
+		vi.advanceTimersByTime(350);
+		let props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual([]);
+		expect(props.selected).toBeNull();
+		panel.handleInput("f");
+		props = panel.describe(pickerCx).p as unknown as TspPickerProps;
+		expect(props.order).toEqual(["prov-a/dead"]);
+		expect(props.selected).toBe("prov-a/dead");
+		panel.handleInput(" ");
+		panel.handleInput("\r");
+		await flushMicrotasks();
+		expect(onClose).toHaveBeenCalledWith([]);
 	});
 });
 

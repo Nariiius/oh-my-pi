@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Render model probes in the native picker with incremental, coalesced row updates, while preserving keyboard/terminal fallback and explicit apply/close actions.
+
 ### Fixed
 
+- Publish native model-probe results in stable batches so unrelated redraws cannot interrupt failed-row removal; keep navigation and toggles on the highlighted model as rows disappear.
 - Attach pasted file paths as atomic composer chips with filename/path cards in terminal and Tern native input, using existing file ingestion on submit and preserving removal, undo, and cleared-draft recall.
 
 ## [18.8.3] - 2026-10-07
