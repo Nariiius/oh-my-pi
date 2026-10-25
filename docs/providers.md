@@ -135,6 +135,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `baseten`                        | `BASETEN_API_KEY`                                                             |
 | `bedrock-mantle`                 | `AWS_BEARER_TOKEN_BEDROCK` or the AWS credential chain (SigV4)                 |
 | `commandcode`                    | `COMMAND_CODE_API_KEY`, then `COMMANDCODE_API_KEY`                            |
+| `coralbricks`                    | `CORAL_API_KEY`, then `CORALBRICKS_API_KEY`                                   |
 | `deepinfra`                      | `DEEPINFRA_API_KEY`                                                           |
 | `deepseek`                       | `DEEPSEEK_API_KEY`                                                            |
 | `siliconflow`                    | `SILICONFLOW_API_KEY`                                                         |
@@ -147,6 +148,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `devin`                          | `DEVIN_API_KEY`                                                               |
 | `gmi-cloud`                      | `GMI_API_KEY`                                                                 |
 | `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                      |
+| `inception`                      | `INCEPTION_API_KEY`                                                           |
 | `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                       |
 | `stepfun`                        | `STEPFUN_API_KEY`                                                             |
 | `helmcode`                       | `HELMCODE_API_KEY`                                                            |
@@ -156,6 +158,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `venice`                         | `VENICE_API_KEY`                                                              |
 | `vercel-ai-gateway`              | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery) |
 | `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
+| `cloudflare-workers-ai`          | `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN`, + `CLOUDFLARE_ACCOUNT_ID` |
 | `snowflake`                      | `SNOWFLAKE_PAT` + `SNOWFLAKE_ACCOUNT`                                         |
 | `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint         |
 | `kilo`                           | `KILO_API_KEY`                                                                |
@@ -171,6 +174,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `minimax`                        | `MINIMAX_API_KEY`                                                             |
 | `alibaba-coding-plan`            | `ALIBABA_CODING_PLAN_API_KEY`                                                 |
 | `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                         |
+| `sambanova`                      | `SAMBANOVA_API_KEY`                                                           |
 | `aimlapi`                        | `AIMLAPI_API_KEY`                                                             |
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
 | `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
@@ -198,9 +202,13 @@ For `xai-oauth`, `XAI_API_KEY` is accepted for an explicit request but does not 
 
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
 
+`cloudflare-workers-ai` serves Cloudflare's Clef decision models (`cloudflare-workers-ai/@cf/cloudflare/clef` and `cloudflare-workers-ai/@cf/cloudflare/clef-flash`) as `judge` models; assign one to the `judge` role to use it. `/login cloudflare-workers-ai` prompts for a Cloudflare API token with Workers AI Read and Edit permissions (create one at `https://dash.cloudflare.com/profile/api-tokens`) and your account ID, then stores both together. To use environment variables, set `CLOUDFLARE_API_TOKEN` (or `CLOUDFLARE_AUTH_TOKEN`) and `CLOUDFLARE_ACCOUNT_ID`.
+
 `/login snowflake` prompts for your Snowflake account identifier or account URL, then signs in through the browser with Snowflake's built-in local-application OAuth integration and stores the account with the token. To use environment variables instead, set both `SNOWFLAKE_PAT` and `SNOWFLAKE_ACCOUNT`.
 
 `charm-hyper` is Charm's OpenAI-compatible inference gateway for coding agents. Issue or manage a key at `https://hyper.charm.land/`; the model list is discovered live from the provider's public `/v1/models` endpoint, and `HYPER_API_KEY` is accepted as a fallback alias for `CHARM_HYPER_API_KEY`.
+
+`inception` is Inception's native Mercury API. Set `INCEPTION_API_KEY` or run `/login inception` with a key from `https://platform.inceptionlabs.ai/dashboard/api-keys`, then select `inception/mercury-3`. OMP discovers chat models from `/v1/models`, including Mercury 3, Mercury 2.5, and Mercury 2; FIM/edit and Decisions-only models are excluded. Mercury 3 supports a 1,000,000-token context and up to 131,072 output tokens. Thinking levels are `minimal`, `low`, `medium`, and `high`; `minimal` maps to Inception's `instant`, and `off` requests that lowest effort rather than disabling reasoning entirely. Mercury does not stream its reasoning, so no thinking text appears and a `high` turn can be silent for minutes before its first output; OMP waits up to 10 minutes for Mercury 3's first chunk (`providers.streamFirstEventTimeoutSeconds` overrides this). While `/v1/models` reports Mercury 3 at $0, OMP prices it at the published launch rate ($0.10 input / $0.35 output per million tokens); a tariff reported by `/v1/models` takes precedence.
 
 SingularityAPI sells two unrelated products behind one brand, so OMP models them as two providers: they share no key, no billing model, and no effort ladder, and neither key is accepted by the other host.
 

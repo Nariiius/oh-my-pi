@@ -1,5 +1,15 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { ConcatSink, getBlobsDir, isEisdir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import {
+	ConcatSink,
+	getBlobsDir,
+	isEisdir,
+	isEnoent,
+	isEnotdir,
+	parseJsonlLenient,
+	peekFile,
+} from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
 import {
@@ -16,6 +26,7 @@ import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./ses
 import { migrateToCurrentVersion } from "./session-migrations";
 import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
+import { enotdir } from "./session-storage-errors";
 import {
 	parseTitleSlotFromContent,
 	parseTitleSlotLine,
@@ -172,25 +183,28 @@ const SESSION_HEADER_READ_LIMIT = 1024 * 1024;
 
 /**
  * The session id in `filePath`'s header, or `undefined` when there is no file
- * there or it does not start with a valid session header. Reads at most one
- * record and {@link SESSION_HEADER_READ_LIMIT} bytes.
+ * there or it does not start with a valid session header. One positioned read
+ * of at most {@link SESSION_HEADER_READ_LIMIT} bytes, parsed to its first record.
  */
 export async function readSessionHeaderId(filePath: string): Promise<string | undefined> {
-	let id: string | undefined;
 	try {
-		await visitEntriesFromFileStream(
-			filePath,
-			entry => {
-				if (isValidSessionHeader(entry)) id = entry.id;
-				return false;
-			},
-			{ maxRecords: 1, maxBytes: SESSION_HEADER_READ_LIMIT },
-		);
+		return await peekFile(filePath, SESSION_HEADER_READ_LIMIT, sessionHeaderIdFromPrefix);
 	} catch (err) {
 		if (isEnoent(err) || isEnotdir(err) || isEisdir(err)) return undefined;
 		throw err;
 	}
-	return id;
+}
+
+/** The header id from a file's leading bytes, past the optional title slot line. */
+function sessionHeaderIdFromPrefix(prefix: Uint8Array): string | undefined {
+	let records = prefix;
+	const newline = prefix.indexOf(0x0a);
+	if (newline !== -1) {
+		const firstLine = new TextDecoder().decode(prefix.subarray(0, newline)).trim();
+		if (firstLine && parseTitleSlotLine(firstLine)) records = prefix.subarray(newline + 1);
+	}
+	const entry = Bun.JSONL.parseChunk(records).values[0] as FileEntry | undefined;
+	return isValidSessionHeader(entry) ? entry.id : undefined;
 }
 
 /** Parse session JSONL and visit each entry without retaining prior entries. */
@@ -230,7 +244,15 @@ export async function visitEntriesFromFileStream(
 		await Bun.sleep(0);
 	};
 
-	const drain = async (): Promise<void> => {
+	const hasPayload = (bytes: Uint8Array, start: number, end: number): boolean => {
+		for (let index = start; index < end; index++) {
+			const byte = bytes[index];
+			if (byte !== 0x09 && byte !== 0x0a && byte !== 0x0d && byte !== 0x20) return true;
+		}
+		return false;
+	};
+
+	const drain = async (endOfInput = false): Promise<void> => {
 		const view = sink.flush();
 		if (!view) return;
 		// Only newline-terminated bytes may reach the parser: a trailing fragment
@@ -286,15 +308,7 @@ export async function visitEntriesFromFileStream(
 				// Malformed record: skip past the next newline and continue.
 				const nextNewline = buffer.indexOf(0x0a, read);
 				if (nextNewline === -1) break; // rest of the bad line not yet received
-				let nonWhitespace = false;
-				for (let index = read; index < nextNewline; index++) {
-					const byte = buffer[index];
-					if (byte !== 0x09 && byte !== 0x0d && byte !== 0x20) {
-						nonWhitespace = true;
-						break;
-					}
-				}
-				if (nonWhitespace) options.onMalformedRecord?.();
+				if (hasPayload(buffer, read, nextNewline)) options.onMalformedRecord?.();
 				recordsSeen++;
 				advance(nextNewline + 1);
 				if (recordsSeen >= maxRecords) {
@@ -303,7 +317,16 @@ export async function visitEntriesFromFileStream(
 				}
 				continue;
 			}
-			if (read === 0) break; // incomplete record awaiting more data
+			if (read === 0) {
+				// Incomplete value awaiting more bytes. Once the input has ended nothing more
+				// is coming, so it is a truncated record (parseJsonlLenient counts it too).
+				if (endOfInput) {
+					if (hasPayload(buffer, 0, buffer.length)) options.onMalformedRecord?.();
+					recordsSeen++;
+					advance(buffer.length);
+				}
+				break;
+			}
 			advance(read);
 			if (done) {
 				advance(buffer.length);
@@ -314,10 +337,15 @@ export async function visitEntriesFromFileStream(
 	};
 
 	try {
-		const file = Bun.file(filePath);
-		const source = Number.isFinite(maxBytes) ? file.slice(0, maxBytes) : file;
-		for await (const chunk of source.stream()) {
+		// Capped by hand, not with `file.slice(0, maxBytes)`: on Bun 1.3.14 a slice's
+		// stream over a file that continues past the slice either stays pending after
+		// delivering its bytes (macOS) or ignores the bound and streams the whole
+		// file (Windows).
+		let unread = maxBytes;
+		for await (const streamed of Bun.file(filePath).stream()) {
 			if (stopped) break;
+			const chunk = streamed.byteLength > unread ? streamed.subarray(0, unread) : streamed;
+			unread -= chunk.byteLength;
 			bytesSinceYield += chunk.byteLength;
 			options.onBytesConsumed?.(chunk.byteLength);
 			// Parsing before the chunk closes a line re-scans the unfinished record
@@ -332,6 +360,7 @@ export async function visitEntriesFromFileStream(
 				}
 				sink.append(chunk);
 				await yieldToMacrotask();
+				if (unread === 0) break;
 				continue;
 			}
 			sink.append(chunk);
@@ -359,12 +388,13 @@ export async function visitEntriesFromFileStream(
 			// sink keeps that remainder for the next chunk.
 			await drain();
 			await yieldToMacrotask();
+			if (unread === 0) break;
 		}
 		// A trailing record without a final newline: terminate it so the parser
 		// can complete it (readline yielded it; parseChunk needs the delimiter).
 		if (!stopped && !sink.isEmpty) {
 			sink.append(LF);
-			await drain();
+			await drain(true);
 		}
 	} catch (err) {
 		if (visitorThrew) throw err;
@@ -437,6 +467,26 @@ async function loadWithKnownSize(
 	};
 }
 
+/**
+ * Windows reports ENOENT when a path component is a regular file, where POSIX
+ * yields ENOTDIR. Inspecting the leaf itself and then climbing to the first
+ * existing ancestor distinguishes that path error from a genuinely missing
+ * file.
+ */
+export async function hasFileAsPathComponent(filePath: string): Promise<boolean> {
+	let current = path.resolve(filePath);
+	for (;;) {
+		try {
+			return !(await fs.stat(current)).isDirectory();
+		} catch {
+			// Missing component: climb to the first existing ancestor.
+		}
+		const parent = path.dirname(current);
+		if (parent === current) return false;
+		current = parent;
+	}
+}
+
 /** Load and validate a session while retaining malformed-record diagnostics. */
 export async function loadSessionFile(
 	filePath: string,
@@ -447,7 +497,17 @@ export async function loadSessionFile(
 		const statSize = storage.statSync(filePath).size;
 		const { loaded, sourceSize } = await loadWithKnownSize(filePath, storage, statSize, options);
 		return { ...loaded, sourceSize };
-	} catch (err) {
+	} catch (caught) {
+		// Windows reports ENOENT where POSIX reports ENOTDIR for a path running
+		// through a regular file; restore ENOTDIR so that path error is never
+		// masked as a missing session.
+		const err =
+			isEnoent(caught) &&
+			process.platform === "win32" &&
+			storage instanceof FileSessionStorage &&
+			(await hasFileAsPathComponent(filePath))
+				? enotdir(filePath)
+				: caught;
 		if (options?.throwIfMissing && (isEnoent(err) || isEnotdir(err))) {
 			throw err;
 		}

@@ -24,6 +24,38 @@ import {
 const SESSION_WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT;
 const utf8Decoder = new TextDecoder("utf-8");
 
+/**
+ * Basename of a rewrite staged by {@link sessionStagingPath}; group 1 is the
+ * target's basename. A live publish renames it away within milliseconds;
+ * `omp gc` reclaims one a killed writer left behind.
+ */
+export const SESSION_STAGING_RE = /^\.(.+)\.[0-9a-f]{16}\.tmp$/;
+
+/** Fresh staging path beside `target`, matching {@link SESSION_STAGING_RE}. */
+export function sessionStagingPath(target: string): string {
+	return path.join(path.dirname(target), `.${path.basename(target)}.${Snowflake.next()}.tmp`);
+}
+
+/**
+ * The file a rewrite must land in: the referent when `fpath` is a symlink.
+ *
+ * A rewrite stages a body beside the path and renames it over it, which
+ * replaces a symlink rather than the transcript it points at. A transcript
+ * staged into `--session-dir` as a symlink would then stop being one: the
+ * staged file would keep every turn before the rewrite while a new regular
+ * file beside it took the rest, and losing the staging directory would lose
+ * them (#15878). Appends need none of this — they write through an open
+ * descriptor, which follows the link.
+ */
+export function sessionPublishTarget(fpath: string): string {
+	try {
+		if (fs.lstatSync(fpath).isSymbolicLink()) return fs.realpathSync(fpath);
+	} catch {
+		// Not there, or not readable: the publish's own checks report that.
+	}
+	return fpath;
+}
+
 export interface SessionStorageStat {
 	size: number;
 	mtimeMs: number;
@@ -224,6 +256,31 @@ const writerRegistry = new FinalizationRegistry<number>(fd => {
 	}
 });
 
+/**
+ * Identity of the file `filePath` currently names, read through a descriptor.
+ * Handle and by-name stat can disagree for the same file (Windows FSLogix
+ * profile disks report different dev/ino), so identity checks compare
+ * descriptor to descriptor. Returns undefined when the path is missing.
+ */
+function statPathByHandle(filePath: string): fs.BigIntStats | undefined {
+	let fd: number;
+	try {
+		fd = fs.openSync(filePath, "r");
+	} catch (err) {
+		if (isEnoent(err)) return undefined;
+		throw err;
+	}
+	try {
+		return fs.fstatSync(fd, { bigint: true });
+	} finally {
+		try {
+			fs.closeSync(fd);
+		} catch {
+			// Read-only descriptor; nothing to roll back.
+		}
+	}
+}
+
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
 	/** Identity of the file `#fd` is open on: fixed for the descriptor's lifetime, so read once per descriptor. */
@@ -275,18 +332,13 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 * interleave, so re-open the live path when its identity changed.
 	 *
 	 * Returns the size of the descriptor the next write appends to: while the
-	 * path still names the held file, the one path `stat` serves both the
+	 * path still names the held file, the one path identity read serves both the
 	 * identity check and the append rollback point.
 	 */
 	#reopenIfReplaced(): number {
 		const held = this.#heldFile();
-		let live: fs.BigIntStats;
-		try {
-			live = fs.statSync(this.#fpath, { bigint: true });
-		} catch (err) {
-			if (isEnoent(err)) return fs.fstatSync(this.#fd).size;
-			throw err;
-		}
+		const live = statPathByHandle(this.#fpath);
+		if (!live) return fs.fstatSync(this.#fd).size;
 		if (live.ino === held.ino && live.dev === held.dev) return Number(live.size);
 		const nextFd = openCloexecSync(this.#fpath, SESSION_WRITE_FLAGS | fs.constants.O_APPEND);
 		writerRegistry.unregister(this);
@@ -310,13 +362,8 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	 */
 	#holdsLivePath(): boolean {
 		const held = this.#heldFile();
-		let live: fs.BigIntStats;
-		try {
-			live = fs.statSync(this.#fpath, { bigint: true });
-		} catch (err) {
-			if (isEnoent(err)) return true;
-			throw err;
-		}
+		const live = statPathByHandle(this.#fpath);
+		if (!live) return true;
 		return live.ino === held.ino && live.dev === held.dev;
 	}
 
@@ -611,7 +658,12 @@ function writeLinesToFileSync(target: string, lines: readonly string[]): void {
 async function writeLinesToFile(target: string, lines: readonly string[]): Promise<void> {
 	const sink = Bun.file(target).writer({ highWaterMark: LINE_STREAM_CHUNK });
 	try {
-		for (const line of lines) sink.write(line);
+		for (const line of lines) {
+			// Backpressured writes can reject after end() has otherwise completed.
+			// Do not publish a partial transcript before every write is confirmed.
+			const written = sink.write(line);
+			if (typeof written !== "number") await written;
+		}
 	} catch (err) {
 		try {
 			// Release the descriptor so the caller can discard the staging file.
@@ -812,13 +864,15 @@ export class FileSessionStorage implements SessionStorage {
 		// on the unlinked inode), in which case we hold nothing. Retry instead
 		// of entering the region unexclusively (hV-oE). The path still naming
 		// our inode proves the record is there (holders only ever create and
-		// unlink lock files), and comparing identities costs two stats instead
-		// of a full open/read/close. The descriptor stays open until after the
-		// comparison so the inode cannot be freed and its number reused by a
-		// successor's file; bigint keeps 64-bit Windows file IDs exact.
+		// unlink lock files). Both identities are read through descriptors:
+		// by-name stat can report a different dev/ino than the handle for the
+		// same file (Windows FSLogix profile disks). Our descriptor stays open
+		// until after the comparison so the inode cannot be freed and its number
+		// reused by a successor's file; bigint keeps 64-bit Windows file IDs exact.
 		try {
 			const held = fs.fstatSync(fd, { bigint: true });
-			const named = fs.statSync(lockPath, { bigint: true });
+			const named = statPathByHandle(lockPath);
+			if (!named) return false;
 			return held.ino === named.ino && held.dev === named.dev;
 		} catch {
 			// Removed under us: hold nothing, retry.
@@ -919,30 +973,34 @@ export class FileSessionStorage implements SessionStorage {
 		stage: (tempPath: string) => void,
 		options: SessionStorageWriteOptions | undefined,
 	): void {
-		const dir = path.dirname(fpath);
+		// A symlinked transcript is rewritten through its referent: the rename
+		// below would otherwise replace the link and strand the transcript it
+		// points at.
+		const target = sessionPublishTarget(fpath);
+		const dir = path.dirname(target);
 		this.ensureDirSync(dir);
-		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
+		const tempPath = sessionStagingPath(target);
 		try {
 			stage(tempPath);
 		} catch (err) {
-			this.#discardTemp(tempPath, fpath);
+			this.#discardTemp(tempPath, target);
 			throw toError(err);
 		}
 		// The freshness check through the final rename runs under the
 		// cross-process publish lock: no cooperating writer can slip an
 		// append between the size check and the rename.
 		try {
-			this.#withPublishLock(fpath, () => {
-				this.#assertExpectedSize(fpath, options?.expectedSize);
+			this.#withPublishLock(target, () => {
+				this.#assertExpectedSize(target, options?.expectedSize);
 				try {
-					this.renameSync(tempPath, fpath);
+					this.renameSync(tempPath, target);
 				} catch (err) {
 					if (!hasFsCode(err, "EPERM")) throw toError(err);
-					this.#replaceSessionFileAfterEpermSync(tempPath, fpath, err);
+					this.#replaceSessionFileAfterEpermSync(tempPath, target, err);
 				}
 			});
 		} catch (err) {
-			this.#discardTemp(tempPath, fpath);
+			this.#discardTemp(tempPath, target);
 			throw toError(err);
 		}
 	}
@@ -973,7 +1031,12 @@ export class FileSessionStorage implements SessionStorage {
 
 	listFilesSync(dir: string, pattern: string): string[] {
 		try {
-			return Array.from(new Bun.Glob(pattern).scanSync(dir)).map(name => path.join(dir, name));
+			// Bun.Glob walks no symlink unless asked, and a transcript placed in
+			// a session directory as one — a launcher's, a supervisor's — is a
+			// transcript like any other (#15878)
+			return Array.from(new Bun.Glob(pattern).scanSync({ cwd: dir, followSymlinks: true })).map(name =>
+				path.join(dir, name),
+			);
 		} catch {
 			return [];
 		}
@@ -1042,13 +1105,16 @@ export class FileSessionStorage implements SessionStorage {
 		stage: (tempPath: string) => Promise<void>,
 		options: WriteTextAtomicOptions | undefined,
 	): Promise<void> {
-		const dir = path.resolve(fpath, "..");
-		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
+		// As {@link #publishSync}: a symlinked transcript is rewritten through
+		// its referent, so the rename does not replace the link.
+		const target = sessionPublishTarget(fpath);
+		const dir = path.resolve(target, "..");
+		const tempPath = sessionStagingPath(target);
 		await fs.promises.mkdir(dir, { recursive: true });
 		try {
 			await stage(tempPath);
 		} catch (err) {
-			this.#discardTemp(tempPath, fpath);
+			this.#discardTemp(tempPath, target);
 			throw toError(err);
 		}
 		// Guard-check + rename MUST NOT be separated by an await. A concurrent
@@ -1056,25 +1122,25 @@ export class FileSessionStorage implements SessionStorage {
 		// publish a fresh body between the check and the rename, and this stale
 		// staged body would overwrite it. Sync rename closes that window.
 		if (options?.commitGuard && !options.commitGuard()) {
-			this.#discardTemp(tempPath, fpath);
+			this.#discardTemp(tempPath, target);
 			return;
 		}
 		try {
 			// The publish lock spans the freshness check through the rename (and
 			// its EPERM fallback): a cooperating appender or rewrite cannot
 			// interleave, and appenders re-open a replaced path before writing.
-			this.#withPublishLock(fpath, () => {
-				this.#assertExpectedSize(fpath, options?.expectedSize);
+			this.#withPublishLock(target, () => {
+				this.#assertExpectedSize(target, options?.expectedSize);
 				try {
-					this.renameSync(tempPath, fpath);
+					this.renameSync(tempPath, target);
 					return;
 				} catch (err) {
 					if (!hasFsCode(err, "EPERM")) throw toError(err);
-					this.#replaceSessionFileAfterEpermSync(tempPath, fpath, err, options?.commitGuard);
+					this.#replaceSessionFileAfterEpermSync(tempPath, target, err, options?.commitGuard);
 				}
 			});
 		} catch (err) {
-			this.#discardTemp(tempPath, fpath);
+			this.#discardTemp(tempPath, target);
 			throw toError(err);
 		}
 	}
@@ -1199,6 +1265,22 @@ export class FileSessionStorage implements SessionStorage {
 	/** Run a synchronous session mutation under its cross-process lock. */
 	withSessionFileLockSync<T>(sessionPath: string, operation: () => T): T {
 		return withFileLockSync(sessionPath, operation);
+	}
+
+	/**
+	 * Rename `replacement` over the session file `fpath` under the
+	 * cross-process publish lock that serializes appends and rewrites, when
+	 * `unchanged` still accepts the file there. Returns whether it renamed.
+	 * Throws {@link SessionLockError} while another writer holds the lock.
+	 */
+	replaceSessionFileSync(fpath: string, replacement: string, unchanged: () => boolean): boolean {
+		let replaced = false;
+		this.#withPublishLock(fpath, () => {
+			if (!unchanged()) return;
+			this.renameSync(replacement, fpath);
+			replaced = true;
+		});
+		return replaced;
 	}
 
 	/**

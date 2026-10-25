@@ -4,16 +4,16 @@ This is the conflict-resolution map for this fork, not an upstream release chang
 
 ## Scope and baseline
 
-- Last integrated upstream: **v18.8.3**, commit `3e3c488a58d294e3a10051da588628e2cfb9d35c` (the upstream parent of merge `a076e46359`).
-- Fork branch at inventory: `local-custom-v18`; pre-split HEAD: `0e0c8f9ca8`.
-- Scope: the **entire net fork delta from that baseline**, plus the file-chip, native account/footer, native probe-picker, probe-account and OAuth-switch changes committed with this guide. Existing commits are not rewritten.
-- Before the new feature commits, the committed delta touched 882 files: 774 added skill assets and 108 other files. Most earlier changes live in broad reapplication/merge commits; do not infer feature boundaries from their subjects alone.
+- Last integrated upstream: **v18.12.6 plus Unreleased fixes**, commit `0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0` (source tip dated 2026-10-22).
+- Fork branch: `local-custom-v18`; pre-integration HEAD: `09863a8153`; backup: `backup/local-custom-v18-before-upstream-20261026`. Original feature-split HEAD: `0e0c8f9ca8`.
+- Scope: the **entire net fork delta from the integrated upstream baseline**, including model probes, gateway policy, skills, file chips and account/footer behavior. Existing custom commits are not rewritten.
+- Historical v18.8.3 inventory before the feature split touched 882 files: 774 added skill assets and 108 other files. The refreshed post-integration inventory is below; do not infer feature boundaries from broad earlier commit subjects.
 - `README.md` describes the fork; `GUIDE.md` describes setup. This document is the preservation checklist. Older setup claims can exceed actual wiring; the limitations below take precedence.
 
 To reconstruct the exact current file inventory and inspect a conflicting feature:
 
 ```sh
-base=3e3c488a58d294e3a10051da588628e2cfb9d35c
+base=0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0
 git diff --name-status "$base" HEAD
 git diff "$base" HEAD -- packages/coding-agent/src/cli/models-cli.ts
 git log --oneline "$base"..HEAD -- packages/coding-agent/src/cli/models-cli.ts
@@ -49,7 +49,7 @@ Paths in this section are relative to the repository root. Shared files delibera
 
 Applying a partial probe expands existing wildcard selectors, removes failed selectors inside the probe scope, preserves unprobed selectors and adds successful models. Failed pinned roles are pruned only after a nonempty merged set. An empty merged set currently writes `enabledModels=[]`, flushes settings and returns `applied:false`; that return is not a no-mutation guarantee. Zero successes can still yield `applied:true` if unprobed enabled selectors survive.
 
-**Side effects:** startup automatically runs probes when results are missing, incomplete or older than 24 hours, and applies them to settings. This is network traffic and a configuration mutation, not read-only discovery. The panel's legacy `autoApply` option is not a promise of automatic apply on completion; preserve the actual explicit apply/close contract.
+**Side effects:** interactive startup automatically runs background probes when no health timestamp exists or it is older than 24 hours. It records health in storage but does not apply enabled-model settings. This is network traffic, not read-only discovery; explicit `--apply`/panel apply mutates configuration. The panel's legacy `autoApply` option is not a promise of automatic apply on completion.
 
 **Checks:** `test/models-probe-cli.test.ts`, `test/models-probe-all-apis.test.ts`, `test/models-probe-panel.test.ts`, `test/slash-commands/models-probe-dispatch.test.ts` under coding-agent. The API integration file covers concrete API families, not every possible catalog API/provider.
 
@@ -109,7 +109,7 @@ Native memo inputs must track provider and account changes, including rotation a
 
 **Hotspots:** coding-agent `src/modes/controllers/input-controller.ts`, `test/input-controller-file-paste.test.ts`; tui `src/prompt/{custom-editor,composer-attachments,attachment-chips}.ts`, `src/status-line/types.ts`, `src/overlays/model-browser.ts`, `test/{custom-editor,attachment-chips}.test.ts`; `docs/keybindings.md`.
 
-**Preserve:** quoting/whitespace handling, filename/path metadata, atomic navigation/deletion, removal, undo and cleared-draft recall. Never substitute a display-only chip that loses file content on submit. The removed `onPasteFilePath` interface is obsolete; use the shared file-paste/composer contract instead of restoring it on one consumer. File chips and images must coexist without exhausting image-only attachment budget.
+**Preserve:** quoting/whitespace handling, filename/path metadata, atomic navigation/deletion, removal, undo and cleared-draft recall. Never substitute a display-only chip that loses file content on submit. `CustomEditor.onPasteFilePath` remains the shared callback wired to `InputController.handleFilePaste`; both ordinary and guarded draft input must route through the same bracketed-paste handling. File chips and images must coexist without exhausting image-only attachment budget.
 
 ### 8. Gateway providers, WAF headers, schemas and extension hooks
 
@@ -142,7 +142,7 @@ Gateway header detection currently includes substring URL matching, not parsed-h
 
 Shared `compareModelIdsWithThinkingEffort` orders same-base variants as base/minimal/low/medium/high/xhigh/max with qualifier/lexical tie-breaks; supported-effort retrieval returns a sorted copy. Keep this order in consumers, not lexicographic effort spelling.
 
-Resolve authored KDL first, then run `bun --cwd=packages/catalog run gen:compat`; never pick an arbitrary side of generated `rules.json`. Model generation is `gen:models` and can have its own external data dependencies. Antigravity wire headers retain local version literals (1.19.6 and google-cloud-sdk/483.0.0); review those against upstream protocol requirements rather than treating them as evergreen.
+Resolve authored KDL first, then run `bun --cwd=packages/catalog run gen:compat`; never pick an arbitrary side of generated `rules.json`. Model generation is `gen:models` and can have its own external data dependencies. Use current upstream wire-version handling (Gemini CLI default 0.46.0; Antigravity manifest discovery with 2.19.1 offline fallback), not the former local 1.19.6/google-cloud-sdk literals. Extra local Claude wire profiles remain additive.
 
 ### 10. OpenRouter fallback pricing and proxy-cache estimates
 
@@ -195,24 +195,24 @@ A checkout's skill tree and external skill packs are different sources. Packaged
 
 **Checks:** catalog `test/protobuf.test.ts`, coding-agent `test/guard-extension.test.ts`, utils `test/sqlite.test.ts` (existing SQLite coverage, not a dedicated checkpoint test). Native compatibility needs an actual compatible addon, not source inspection alone.
 
-### 14. Retained drift and removed upstream safeguards
+### 14. Reconciled safeguards and retained drift
 
 These are part of the net delta, **not automatically intentional requirements**. Do not silently perpetuate them or silently drop them; explain the resolution.
 
-- ai `src/providers/cursor.ts` removed caller-header forwarding/sanitization for HTTP/2 Run, and `test/cursor-caller-headers.test.ts` was deleted. Upstream's real-wire coverage included case normalization and protection of auth/content-type/request-ID/pseudo/connection headers. Preserve/reconcile newer upstream security independently; custom caller headers currently are not forwarded.
-- catalog `src/wire/gemini-headers.ts` removed case-insensitive collision filtering, leaving ordinary default/caller object spread. Restoring upstream collision protection is not in conflict with keeping local version strings.
-- coding-agent `src/internal-urls/docs-index.generated.ts` is a retained generated addition. Regenerate from actual documentation via `scripts/generate-docs-index.ts` after relevant documentation merges; do not preserve stale embedded text as authoritative.
+- ai `src/providers/cursor.ts` now retains current upstream caller-header forwarding/sanitization for HTTP/2 Run; `test/cursor-caller-headers.test.ts` is restored. Keep its real-wire protection of auth/content-type/request-ID/pseudo/connection headers; the earlier local deletion is not a requirement.
+- catalog `src/wire/gemini-headers.ts` and ai Gemini request assembly follow the current upstream wire/version design. The former local merge-helper/version differences are superseded; keep the additive Antigravity model profiles without reviving obsolete helpers or pinned client versions.
+- Removed the unused local `src/internal-urls/docs-index.generated.ts` blob. Current source loads repo docs; bundle/compiled builds use `buildDocsIndexPayload()` and the shipped `dist/docs-index.generated.txt`/build-time embed. Do not restore the stale TypeScript snapshot.
 - coding-agent `CHANGELOG.md` includes inserted old 17.x history before later 18.x sections. Treat as historical drift, not new feature evidence.
 - coding-agent `src/modes/interactive-mode.ts` retains optional session/settings/title/goal guards, an unused import and whitespace drift. Keep actual error/validation behavior when moving code; do not infer a supported API from fixture-shaped optional guards.
 - coding-agent `src/modes/controllers/event-controller.ts` suppresses repeated identical errors until reset and includes the original error in retry countdowns. It is stateful and lacks dedicated retained regression coverage.
 - `test/startup-composer.test.ts` accepts more leading border glyphs; `test/issue-5764-registertool-loadmode.test.ts` changes expected discovered tool count alongside loader changes. Those assertions are not substitutes for verifying the user-facing behavior.
 - The final `packages/catalog/src/models.ts` line wrap and `packages/coding-agent/test/skills.test.ts` formatting changes are formatting-only and committed separately.
 
-## New feature commit boundaries
+## Original feature commit boundaries
 
-Find the exact hashes with `git log --oneline 0e0c8f9ca8..HEAD`. Each behavior commit includes its own changelog/tests; shared panel/changelog files are split through the index rather than rewriting earlier history.
+Find the exact original hashes with `git log --oneline 0e0c8f9ca8..09863a8153`. Each behavior commit includes its own changelog/tests; shared panel/changelog files were split through the index rather than rewriting earlier history.
 
-1. Atomic pasted-file chips and obsolete paste interface removal.
+1. Atomic pasted-file chips and submit-time file ingestion.
 2. Shared compact account formatter and native footer/provider-account invalidation.
 3. Native probe picker, stable batching and native sheet routing.
 4. Per-request probe account attribution across native/terminal/text/JSON surfaces.
@@ -220,7 +220,7 @@ Find the exact hashes with `git log --oneline 0e0c8f9ca8..HEAD`. Each behavior c
 6. Formatting-only collateral.
 7. This full-fork guide and README/AGENTS discovery links.
 
-## Verification record for this split
+## Historical verification record: v18.8.3 feature split
 
 - Final feature checks passed: attachment-chips (14), custom-editor (90), input-controller-file-paste (17), models-probe-all-apis (8), models-probe-panel (27), agent-session-model-switch-auth (6), status-line-settings-cache (14), skills (61), and probe CLI (15): 252 tests, zero failures.
 - The isolated native-picker index snapshot, without the later account feature, also passed its 26 panel tests and a local HTTP/native-picker/terminal/apply runtime smoke. The temporary checkout needed the existing generated HTML tool-view asset linked before it could run.
@@ -230,15 +230,37 @@ Find the exact hashes with `git log --oneline 0e0c8f9ca8..HEAD`. Each behavior c
 
 Future merges must rerun the relevant checks on the new tree; this record is not an evergreen pass claim.
 
+## Upstream integration: 2026-10-26
+
+- Integrated `origin/main` at `0b5c27ab24719c86a5986b95ee55f4e75bc1aaa0` (source tip dated 2026-10-22). Version moved from 18.8.3 to 18.12.6; this tip also contains the upstream Unreleased fixes. The previous upstream base was `3e3c488a58d294e3a10051da588628e2cfb9d35c`: 5,071 incoming commits and 2,729 changed paths.
+- Preserved the pre-integration fork at `backup/local-custom-v18-before-upstream-20261026` (`09863a8153`). The custom branch and fork remote/tracking remain in place; no push or history rewrite was performed.
+- Resolved 14 conflicts by retaining both upstream lifecycle/transport APIs and local behavior. Cline compatibility now comes from upstream KDL rather than the removed `isClinePass` field. Regenerated `compat/rules.json` from the merged authored KDL (1,096 rules).
+- The upstream editor centralizes bracketed paste for normal and guarded draft input; file-path chip preparation now runs through that shared path. Kept upstream background-call/approval lifecycle state alongside local repeated-error suppression and probe routing.
+- Retained upstream Cursor header sanitization and restored its HTTP/2 wire regression file. Adopted current upstream Gemini/Antigravity header/version handling while keeping extra local model wire profiles. Removed the unused old generated TypeScript docs blob; current source/bundle docs mechanisms are authoritative.
+- Corrected two earlier guide inaccuracies without changing the pre-merge behavior: `onPasteFilePath` is an active shared callback, and the background startup probe records health but does not apply enabled-model settings. Explicit probe apply still persists settings as described above.
+- Installed locked dependencies with Bun 1.3.14 and rebuilt the macOS arm64 native addon. The source-linked `omp` launcher now reports 18.12.6. Restart already-running OMP sessions after updating; the new native IPC API requires matching source/addon versions.
+
+### Current verification
+
+- Passed `check:types` for catalog, ai, tui and coding-agent; reran coding-agent after the final regression change.
+- Passed the targeted customization batches: 105 TUI tests, 319 AI/catalog tests and 443 coding-agent tests. An additional 27-check run passed for file-paste ingestion (including the new guarded draft case), Cursor caller headers and the current docs generator/runtime contract; that run repeats the earlier file-paste suite.
+- Passed the complete `ci:test:smoke` command after the native rebuild: version/help, stats help and native runtime smoke (`smoke-test: ok`). `omp models --help` still exposes the local probe command.
+- A throwaway isolated HOME/config/session workspace exercised the actual CLI against a local HTTP/SSE provider: print-mode response, model selection, endpoint routing, auth header, and `models probe --json` successful health output with `applied:false`.
+- Launched the actual terminal UI in an isolated pseudo-terminal; observed the model/footer, pasted-file attachment card/chip, and atomic Backspace removal. The scripted session was stopped by its timeout; this did not verify graceful interactive shutdown or the native desktop renderer.
+- Loaded all 10 installed user extensions explicitly in an isolated CLI session and completed a local model turn (AgentRouter, Antigravity guard, context budget, director, guard, three Orca helpers, RTK and task-boundary). No load errors were reported. Installed extension files were not edited; live director workers/Orca integration were not exercised. None of those extension files calls `ui.approve()`; external custom UI hosts must still migrate its upstream boolean-to-choice contract.
+- No live provider credentials/remote probes, full test suite, native desktop/hardware interaction, full skill-script sweep or historical stats backfill were verified. The OpenRouter usage provider and standalone UsagePanel remain unregistered/unmounted; the known stats backfill marker anomaly remains unchanged.
+
 ## Exact non-skill file inventory
 
-Baseline-to-final-tree status (`A` added, `M` modified, `D` deleted). This includes all non-skill paths, including formatting/generated/history drift; the 774 skill additions are the `.omp/skills/**` group above and can be expanded with the exact inventory command.
+Integrated-upstream-to-fork status (`A` added, `M` modified, `D` deleted): 121 non-skill paths, including changelogs, formatting and historical drift. The remaining 774 added skill assets are the `.omp/skills/**` group above; use the inventory command to expand them. This supersedes the previous v18.8.3 inventory.
 
 ```text
 M	AGENTS.md
-M	docs/keybindings.md
 A	GUIDE.md
 A	LOCAL_CHANGES.md
+M	README.md
+M	docs/keybindings.md
+M	packages/ai/CHANGELOG.md
 M	packages/ai/src/error/rate-limit.ts
 M	packages/ai/src/providers/anthropic.ts
 M	packages/ai/src/providers/cursor.ts
@@ -256,10 +278,10 @@ A	packages/ai/src/registry/tokenforge.ts
 A	packages/ai/src/usage/openrouter.ts
 M	packages/ai/src/utils/schema/normalize.ts
 M	packages/ai/test/auth-hooks-registry.test.ts
-D	packages/ai/test/cursor-caller-headers.test.ts
 A	packages/ai/test/gateway-waf-headers.test.ts
 M	packages/ai/test/openai-completions-compat.test.ts
 M	packages/ai/test/schema-helpers.test.ts
+M	packages/catalog/CHANGELOG.md
 M	packages/catalog/package.json
 M	packages/catalog/scripts/generate-models.ts
 M	packages/catalog/src/compat/collapse.ts
@@ -295,7 +317,6 @@ M	packages/coding-agent/src/config/models-config-schema-bundle.ts
 A	packages/coding-agent/src/extensibility/extensions/agentrouter.ts
 M	packages/coding-agent/src/extensibility/extensions/loader.ts
 M	packages/coding-agent/src/extensibility/skills.ts
-A	packages/coding-agent/src/internal-urls/docs-index.generated.ts
 M	packages/coding-agent/src/main.ts
 M	packages/coding-agent/src/modes/acp/acp-agent.ts
 A	packages/coding-agent/src/modes/components/models-probe-panel.ts
@@ -355,6 +376,5 @@ M	packages/tui/test/custom-editor.test.ts
 M	packages/utils/CHANGELOG.md
 M	packages/utils/src/format.ts
 M	packages/utils/src/sqlite.ts
-M	README.md
 ```
 

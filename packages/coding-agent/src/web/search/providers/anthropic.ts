@@ -20,6 +20,10 @@ import {
 	withAuth,
 } from "@oh-my-pi/pi-ai";
 import { buildAnthropicSystemBlocks, wrapFetchForCch } from "@oh-my-pi/pi-ai/providers/anthropic";
+import {
+	anthropicApiVersionAcceptsSamplingParams,
+	resolveAnthropicApiVersion,
+} from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { AnthropicApiResponse, AnthropicCitation } from "../../../web/search/types";
@@ -149,7 +153,13 @@ async function callSearch(
 	timeoutMs?: number,
 ): Promise<AnthropicApiResponse> {
 	const url = buildAnthropicUrl(auth);
-	const headers = { ...configuredHeaders, ...buildAnthropicSearchHeaders(auth) };
+	const headers = buildAnthropicSearchHeaders(auth, {
+		modelHeaders: configuredHeaders,
+		allowAnthropicHeaderOverrides:
+			model.compat !== undefined &&
+			"allowAnthropicHeaderOverrides" in model.compat &&
+			model.compat.allowAnthropicHeaderOverrides === true,
+	});
 
 	const injectClaudeCodeInstruction =
 		model.compat === undefined ||
@@ -175,8 +185,13 @@ async function callSearch(
 		body.metadata = { user_id: metadataUserId };
 	}
 
-	// Opus 4.7+, Sonnet 5+, and Fable/Mythos 5 reject sampling parameters with a 400.
-	if (temperature !== undefined && !hasSamplingRestrictions(model)) {
+	// Opus 4.7+, Sonnet 5+, and Fable/Mythos 5 reject sampling parameters with a 400,
+	// and API version 2026-10-21 rejects them on every model.
+	if (
+		temperature !== undefined &&
+		!hasSamplingRestrictions(model) &&
+		anthropicApiVersionAcceptsSamplingParams(resolveAnthropicApiVersion(auth.baseUrl))
+	) {
 		body.temperature = temperature;
 	}
 
@@ -250,12 +265,16 @@ function parsePageAge(pageAge: string | null | undefined): number | undefined {
  * @returns Normalized response with answer, sources, citations, and usage
  */
 function parseResponse(response: AnthropicApiResponse): SearchResponse {
-	const answerParts: string[] = [];
+	// Citations split continuous text into adjacent text blocks; insert a paragraph
+	// break only when non-empty text resumes after a non-text block.
+	let answer = "";
+	let previousWasText = false;
 	const searchQueries: string[] = [];
 	const sources: SearchSource[] = [];
 	const citations: SearchCitation[] = [];
 
 	for (const block of response.content) {
+		if (block.type !== "text") previousWasText = false;
 		if (
 			block.type === "server_tool_use" &&
 			block.name &&
@@ -280,7 +299,9 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 			}
 		} else if (block.type === "text" && block.text) {
 			// Synthesized answer with citations
-			answerParts.push(block.text);
+			if (answer && !previousWasText) answer += "\n\n";
+			answer += block.text;
+			previousWasText = true;
 			if (block.citations) {
 				for (const c of block.citations as AnthropicCitation[]) {
 					citations.push({
@@ -295,7 +316,7 @@ function parseResponse(response: AnthropicApiResponse): SearchResponse {
 
 	return {
 		provider: "anthropic",
-		answer: answerParts.join("\n\n") || undefined,
+		answer: answer || undefined,
 		sources,
 		citations: citations.length > 0 ? citations : undefined,
 		searchQueries: searchQueries.length > 0 ? searchQueries : undefined,
@@ -330,7 +351,7 @@ export async function searchAnthropic(params: SearchParams): Promise<SearchRespo
 	const response = await withAuth(
 		keyOrResolver,
 		async key => {
-			const auth = buildAnthropicAuthConfig(key, params.model.baseUrl);
+			const auth = buildAnthropicAuthConfig(key, params.model.baseUrl, { isOAuth: params.model.isOAuth });
 			const configuredHeaders = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
 			// Mirror the main Messages path: OAuth requests need a Claude-Code-shaped
 			// metadata.user_id (`{session_id, account_uuid?, device_id}`) so the

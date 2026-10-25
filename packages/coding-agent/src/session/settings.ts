@@ -1,6 +1,4 @@
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
-import { cfgEditMode } from "../edit/settings";
-import { cfgEvalJs } from "../eval/settings";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -29,7 +27,6 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
-const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
@@ -85,6 +82,46 @@ export const cfgPrewalkEnabled = register({
 	},
 });
 
+export const cfgPrewalkAuto = register({
+	id: "prewalk.auto",
+	type: "enum",
+	values: ["off", "suggest", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Auto Prewalk",
+		description:
+			"Ask the native judge resolved through the 'judge' role whether each new top-level user task front-loads its hard reasoning. Needs a native judge; without one nothing is classified. Independent of Enable Prewalk.",
+		options: [
+			{ value: "off", label: "Off", description: "Never classify prompts for prewalk" },
+			{
+				value: "suggest",
+				label: "Suggest",
+				description: "Classify each task and report the decision without arming prewalk",
+			},
+			{
+				value: "on",
+				label: "On",
+				description:
+					"For confidently front-loaded tasks, arm a handoff from the active model to the auto target; the next task starts back on the planning model",
+			},
+		],
+	},
+});
+
+export const cfgPrewalkAutoTarget = register({
+	id: "prewalk.autoTarget",
+	type: "string",
+	default: "@smol",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Auto-prewalk target",
+		description: "Model or role (default '@smol') auto-prewalk hands off to at the first edit/write.",
+	},
+});
+
 function isLimitRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -137,44 +174,6 @@ export const cfgProvidersMaxInFlightRequests = register({
 effect(cfgProvidersMaxInFlightRequests, limits =>
 	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
 );
-
-export const cfgProvidersOpenaiCodexCodeMode = register({
-	id: "providers.openai-codex.codeMode",
-	type: "enum",
-	values: ["off", "on", "auto"] as const,
-	default: "off",
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Codex Code Mode",
-		description:
-			"Route Codex code_mode_only models (GPT-5.6) through eval. The direct tools are eval, ask, todo, yield, think, checkpoint, and rewind. Use eval cells for other session tools. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
-	},
-});
-
-export const cfgProvidersOpenaiCodexCodeModeDirectTools = register({
-	id: "providers.openai-codex.codeModeDirectTools",
-	type: "array",
-	default: EMPTY_STRING_ARRAY,
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Codex Code Mode Direct Tools",
-		description:
-			"Extra direct tools for Codex Code Mode. The standard direct tools are eval, ask, todo, yield, think, checkpoint, and rewind.",
-	},
-});
-
-/**
- * Settings that change the Code Mode tool partition. `edit.mode` belongs here because it renames
- * `EditTool` on the wire (`apply_patch` vs `edit`), which the namespace metadata is keyed by.
- */
-export const cfgCodeModeInputs = combine({
-	codeMode: cfgProvidersOpenaiCodexCodeMode,
-	directTools: cfgProvidersOpenaiCodexCodeModeDirectTools,
-	evalJs: cfgEvalJs,
-	editMode: cfgEditMode,
-});
 
 export const cfgImagesDescribeForTextModels = register({
 	id: "images.describeForTextModels",
@@ -735,7 +734,34 @@ export const cfgRetryModelFallback = register({
 		tab: "model",
 		group: "Retry & Fallback",
 		label: "Retry Model Fallback",
-		description: "Allow retry recovery to switch to configured fallback models",
+		description:
+			"Allow retry recovery to switch to models in retry.fallbackChains after provider errors. Independent of Auto-Promote Context",
+	},
+});
+
+export const cfgRetryFallbackOn = register({
+	id: "retry.fallbackOn",
+	type: "enum",
+	values: ["any", "usage-limit", "except-usage-limit"] as const,
+	default: "any",
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Fallback Trigger",
+		description: "Which failed requests may switch to a configured fallback model",
+		options: [
+			{ value: "any", label: "Any error", description: "Every provider error may switch models" },
+			{
+				value: "usage-limit",
+				label: "Usage limits only",
+				description: "Switch only on a usage limit; retry other errors on the same model, then surface them",
+			},
+			{
+				value: "except-usage-limit",
+				label: "All but usage limits",
+				description: "Wait out or surface a usage limit; switch on other errors",
+			},
+		],
 	},
 });
 
@@ -846,6 +872,7 @@ export const cfgRetry = combine({
 	maxDelayMs: cfgRetryMaxDelayMs,
 	waitForUsageReset: cfgRetryWaitForUsageReset,
 	modelFallback: cfgRetryModelFallback,
+	fallbackOn: cfgRetryFallbackOn,
 	usageAwareFallback: cfgRetryUsageAwareFallback,
 	usageReservePct: cfgRetryUsageReservePct,
 	usageReservePolicy: cfgRetryUsageReservePolicy,
@@ -1140,8 +1167,9 @@ export const cfgProvidersCacheRetention = register({
 			},
 			{
 				value: "long",
-				label: "Long (1h)",
-				description: "1h TTL where the provider supports it; pricier writes, only warmed during active runs",
+				label: "Long (1h+)",
+				description:
+					"Longer TTL where supported (Anthropic/Bedrock 1h, OpenAI GPT-5.6+ Responses 12h); pricier writes, only warmed during active runs",
 			},
 			{ value: "none", label: "Off", description: "Disable prompt caching and cache-affinity routing" },
 		],
@@ -1278,12 +1306,13 @@ export const cfgCodexResetsAutoRedeem = register({
 		group: "Services",
 		label: "Codex Auto-Redeem Saved Resets",
 		description:
-			"Spend saved Codex rate-limit resets automatically: restore an account blocked by an exhausted 5h or weekly window when a turn is stuck and no other account can take over, and salvage credits that are about to expire. unset asks before the first spend, yes spends without prompting, and no disables both checks.",
+			"Spend saved Codex rate-limit resets automatically: restore an account blocked by an exhausted 5h or weekly window when a turn is stuck and no other account can take over, and salvage credits that are about to expire. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables both checks.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description: "Check eligibility, then ask before spending the first saved reset.",
+				description:
+					"Check eligibility, then ask before spending the first saved reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible saved resets without prompting." },
 			{ value: "no", label: "No", description: "Do not run the saved-reset auto-redeem check." },
@@ -1352,12 +1381,13 @@ export const cfgClaudeResetsAutoRedeem = register({
 		group: "Services",
 		label: "Claude Auto-Redeem Resets",
 		description:
-			"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend, yes spends without prompting, and no disables blocked recovery and expiry salvage.",
+			"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend (with no prompt UI, it spends only a reset expiring within 5 minutes), yes spends without prompting, and no disables blocked recovery and expiry salvage.",
 		options: [
 			{
 				value: "unset",
 				label: "Unset",
-				description: "Check live eligibility, then ask before spending the first Claude reset.",
+				description:
+					"Check live eligibility, then ask before spending the first Claude reset. With no prompt UI, spend only a reset expiring within 5 minutes.",
 			},
 			{ value: "yes", label: "Yes", description: "Spend eligible Claude resets without prompting." },
 			{ value: "no", label: "No", description: "Do not run Claude reset auto-redeem checks." },

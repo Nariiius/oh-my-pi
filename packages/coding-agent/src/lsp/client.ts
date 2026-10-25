@@ -18,7 +18,7 @@ import type {
 	ServerConfig,
 	WorkspaceEdit,
 } from "./types";
-import { detectLanguageId, EquivalentUriMap, fileToUri, uriToFile } from "./utils";
+import { detectLanguageId, EquivalentUriMap, fileToUri, readTextFromDisk, uriToFile } from "./utils";
 
 // =============================================================================
 // Client State
@@ -55,11 +55,12 @@ let idleTimeoutMs: number | null = null;
 let idleCheckInterval: NodeJS.Timeout | null = null;
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 
-// Broker-shared server mode (one language server per project shared by every
-// omp instance through the LSP mux daemon). Off by default so embedders and
-// tests that drive getOrCreateClient directly never touch the daemon broker;
-// the SDK sets it from the `lsp.shared` setting at session creation and on every
-// later change. Only consulted at cold-start, so running clients keep their transport.
+// Broker-shared server mode: language servers hosted by the per-project LSP mux
+// daemon, one per connection; a released server lingers for reuse while the mux runs.
+// Off by default so embedders and tests that drive getOrCreateClient directly
+// never touch the daemon broker; the SDK sets it from the `lsp.shared` setting at
+// session creation and on every later change. Only consulted at cold-start, so
+// running clients keep their transport.
 let sharedLspEnabled = false;
 
 /** Enable or disable attaching to broker-shared language servers. */
@@ -1061,6 +1062,9 @@ export async function getOrCreateClient(
 	const clientPromise = (async () => {
 		const baseCommand = config.resolvedCommand ?? config.command;
 		const baseArgs = config.args ?? [];
+		// Sent in both the mux handshake and `initialize`: a reused shared server
+		// answers `initialize` from cache, so the mux keys servers on these options.
+		const initializationOptions = config.initOptions ?? {};
 
 		// Wrap with lspmux if available and supported
 		const { command, args, env } = isLspmuxSupported(baseCommand)
@@ -1072,7 +1076,7 @@ export async function getOrCreateClient(
 		// to a private spawn so LSP never regresses on broker trouble.
 		let proc: LspTransport | null = null;
 		if (sharedLspEnabled && command === baseCommand) {
-			proc = await connectSharedLspTransport({ command, args, cwd, env, signal });
+			proc = await connectSharedLspTransport({ command, args, cwd, env, initializationOptions, signal });
 		}
 		proc ??= ptree.spawn([command, ...args], {
 			cwd,
@@ -1154,7 +1158,7 @@ export async function getOrCreateClient(
 					rootUri: fileToUri(cwd),
 					rootPath: cwd,
 					capabilities: CLIENT_CAPABILITIES,
-					initializationOptions: config.initOptions ?? {},
+					initializationOptions,
 					workspaceFolders: currentWorkspaceFolders(client),
 				},
 				signal,
@@ -1295,7 +1299,7 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 
 		let content: string;
 		try {
-			content = await Bun.file(filePath).text();
+			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
 			if (isEnoent(err)) return;
@@ -1383,7 +1387,7 @@ export async function reconcileFileFromDisk(
 
 		let content: string;
 		try {
-			content = await Bun.file(filePath).text();
+			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
 			if (isEnoent(err)) return;
@@ -1422,6 +1426,29 @@ export async function reconcileFileFromDisk(
 		fileOperationLocks.delete(lockKey);
 	}
 	return didChange;
+}
+
+/**
+ * Reconciles every document the client holds open against disk.
+ *
+ * A project-wide request answers with ranges for every file it touches. An
+ * already-open consumer that was edited outside OMP keeps a stale overlay, so
+ * the server's ranges still point at the old text — applying them to the
+ * current disk text writes the new identifier into the wrong lines while the
+ * request reports success (#15772). Reconciling only the requested target
+ * leaves those consumers stale, so sync all open documents first.
+ *
+ * Files with an in-flight OMP write are skipped by
+ * {@link reconcileFileFromDisk} (their overlay leads disk), and unchanged files
+ * send nothing. Returns the number of documents that were re-synced.
+ */
+export async function reconcileOpenFilesFromDisk(client: LspClient, signal?: AbortSignal): Promise<number> {
+	let reconciled = 0;
+	for (const uri of Array.from(client.openFiles.keys())) {
+		if (!uri.startsWith("file://")) continue;
+		if (await reconcileFileFromDisk(client, uriToFile(uri), signal)) reconciled++;
+	}
+	return reconciled;
 }
 
 /**
@@ -1634,7 +1661,7 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 
 		let content: string;
 		try {
-			content = await Bun.file(filePath).text();
+			content = await readTextFromDisk(filePath);
 			throwIfAborted(signal);
 		} catch (err) {
 			if (isEnoent(err)) return;

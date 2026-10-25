@@ -3,6 +3,7 @@ import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-a
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 import { logger } from "@oh-my-pi/pi-utils";
+import { isEvalStateContext } from "../eval/state";
 import {
 	collectNativeReplayRegexSecretValues,
 	obfuscateNativeReplay,
@@ -15,7 +16,7 @@ import {
 	formatSessionHistoryMarkdown,
 	PRIMARY_CONTEXT_CUSTOM_TYPES,
 } from "../session/session-history-format";
-import { ADVISOR_RENDER_OPTIONS, renderAdvisorDeltaChunks } from "./delta-split";
+import { ADVISOR_RENDER_OPTIONS, advisorToolIOTransform, renderAdvisorDeltaChunks } from "./delta-split";
 import { fingerprintMessage } from "./message-fingerprint";
 
 /**
@@ -253,13 +254,6 @@ interface CatchupWaiter {
 	finish: (caughtUp: boolean) => void;
 	timer?: NodeJS.Timeout;
 }
-
-/**
- * Synthetic message `AgentSession.#withEvalStateContext` appends at the tail of
- * every display-context rebuild; its slot moves each time, so
- * {@link AdvisorRuntime.rebaseDeliveredPrefix} does not align on it.
- */
-const EVAL_STATE_CONTEXT_TYPE = "eval-state-context";
 
 interface DeliveredMessage {
 	message: AgentMessage;
@@ -736,7 +730,7 @@ export class AdvisorRuntime {
 		const rebased: DeliveredMessage[] = [];
 		for (const delivered of this.#deliveredPrefix) {
 			const message = delivered.message;
-			if (message.role === "custom" && message.customType === EVAL_STATE_CONTEXT_TYPE) continue;
+			if (isEvalStateContext(message)) continue;
 			const current = all[rebased.length];
 			if (current === undefined) return;
 			const fingerprint = fingerprintMessage(current);
@@ -938,7 +932,7 @@ export class AdvisorRuntime {
 			md = formatSessionHistoryMarkdown(this.#obfuscatePrimaryContextMessages(obfuscator, delta), {
 				...ADVISOR_RENDER_OPTIONS,
 				includeThinking,
-				transformExpandedToolIO: text => obfuscator.obfuscate(text, this.#advisorRegexSecretValues),
+				transformExpandedToolIO: advisorToolIOTransform(obfuscator, this.#advisorRegexSecretValues),
 			});
 			md = obfuscator.obfuscate(md, this.#advisorRegexSecretValues);
 		}
@@ -1687,7 +1681,7 @@ export class AdvisorRuntime {
 }
 
 /** Mirrors turn recovery's refusal classification without treating account eligibility as a model refusal. */
-function isClassifierRefusal(message: AssistantMessage): boolean {
+export function isClassifierRefusal(message: AssistantMessage): boolean {
 	if (message.stopReason !== "error") return false;
 	const id = AIError.classifyMessage(message);
 	if (AIError.is(id, AIError.Flag.AccountPolicy)) return false;
@@ -1749,7 +1743,7 @@ function obfuscateAssistantMessage(
 			const args = obfuscateToolArguments(obfuscator, block.arguments, sharedRegexSecretValues);
 			if (args === block.arguments) return block;
 			changed = true;
-			return { ...block, arguments: args };
+			return { ...block, arguments: args, thoughtSignature: undefined };
 		}
 		return block;
 	});
@@ -1818,12 +1812,18 @@ function obfuscateAdvisorMessage(
 		}
 		case "bashExecution": {
 			const msg = message as AgentMessage & { command: string };
-			const command = obfuscator.obfuscate(formatExecutionSourcePreview(msg.command), sharedRegexSecretValues);
+			const command = formatExecutionSourcePreview(
+				msg.command,
+				advisorToolIOTransform(obfuscator, sharedRegexSecretValues),
+			);
 			return command === msg.command ? message : ({ ...(message as object), command } as AgentMessage);
 		}
 		case "pythonExecution": {
 			const msg = message as AgentMessage & { code: string };
-			const code = obfuscator.obfuscate(formatExecutionSourcePreview(msg.code), sharedRegexSecretValues);
+			const code = formatExecutionSourcePreview(
+				msg.code,
+				advisorToolIOTransform(obfuscator, sharedRegexSecretValues),
+			);
 			return code === msg.code ? message : ({ ...(message as object), code } as AgentMessage);
 		}
 		case "branchSummary": {

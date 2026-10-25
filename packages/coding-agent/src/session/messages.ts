@@ -99,7 +99,13 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 	for (const block of message.content) {
 		if (block.type === "redactedThinking" || block.type === "anthropicServerTool") continue;
 		if (block.type === "thinking") {
-			content.push({ type: "thinking", thinking: block.thinking });
+			// Signatures are replay-bound and go; summary and narration state are provenance and stay.
+			content.push({
+				type: "thinking",
+				thinking: block.thinking,
+				...(block.summary !== undefined && { summary: block.summary }),
+				...(block.narration && { narration: true }),
+			});
 			continue;
 		}
 		content.push(block);
@@ -171,6 +177,17 @@ export function buildReplanTitleContext(messages: AgentMessage[]): string {
 	// of the shared truncation budget.
 	const bounded = anchors.map(turn => ({ ...turn, text: turn.text?.slice(0, REPLAN_TITLE_ANCHOR_CHARS) }));
 	return formatTitleConversationContext([...bounded, ...recent]);
+}
+
+/**
+ * Title text of a message the operator wrote: a typed prompt, or a `/skill:`
+ * invocation as its chip (never the expanded skill body). `undefined` for
+ * agent-attributed and non-user messages, which automatic titles never name.
+ */
+export function operatorTitleText(message: AgentMessage): string | undefined {
+	if (message.role === "custom") return titleTextFromSkillPrompt(message);
+	if (message.role !== "user" || message.attribution !== "user") return undefined;
+	return textFromContent(message.content) || undefined;
 }
 
 /**
@@ -379,6 +396,9 @@ export const INTERRUPTED_THINKING_MESSAGE_TYPE = "interrupted-thinking";
 
 /** Custom message type for the transient checkpoint-active reminder. */
 export const CHECKPOINT_ACTIVE_REMINDER_TYPE = "checkpoint-active-reminder";
+
+/** Custom message type carrying a completed rewind's report into model context. */
+export const REWIND_REPORT_MESSAGE_TYPE = "rewind-report";
 
 /** Metadata persisted with a hidden interrupted-thinking continuity message. */
 export interface InterruptedThinkingDetails {

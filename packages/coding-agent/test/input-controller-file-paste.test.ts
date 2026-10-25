@@ -147,6 +147,21 @@ describe("InputController file-path paste", () => {
 		expect((messages[0] as FileMentionMessage).files[0].content).toContain("bracketed-paste content");
 	});
 
+	it("guard draft paste preserves file ingestion and explicit submission", async () => {
+		const cwd = await createDirectory();
+		const file = path.join(cwd, "guard notes.txt");
+		await Bun.write(file, "guard draft file content\n");
+		const { editor } = createContext(cwd);
+		const onSubmit = vi.fn();
+		editor.onSubmit = onSubmit;
+		editor.handleDraftEdit(`\x1b[200~${file}\x1b[201~`);
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(editor.composerChips().map(chip => chip.kind)).toEqual(["file"]);
+		expect((await embeddedFiles(editor, cwd))[0].content).toContain("guard draft file content");
+		editor.handleDraftEdit("\r");
+		expect(extractFileMentions(onSubmit.mock.calls[0][0])).toEqual([file]);
+	});
+
 	it("the clipboard shortcut text fallback creates a file chip in the main editor", async () => {
 		const cwd = await createDirectory();
 		const file = path.join(cwd, "clipboard.txt");

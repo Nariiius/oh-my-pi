@@ -185,6 +185,8 @@ pub struct ThinkingContent {
 	pub thinking: Option<String>,
 	pub thinking_signature: Option<String>,
 	pub item_id: Option<String>,
+	/// Prose the model addressed to the user, returned by the provider as thinking; present it as answer text.
+	pub narration: Option<bool>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -201,11 +203,15 @@ impl Serialize for ThinkingContent {
 		if let Some(value) = &self.item_id {
 			map.serialize_entry("itemId", value)?;
 		}
+		if let Some(value) = &self.narration {
+			map.serialize_entry("narration", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"thinking" if self.thinking.is_some() => continue,
 				"thinkingSignature" if self.thinking_signature.is_some() => continue,
 				"itemId" if self.item_id.is_some() => continue,
+				"narration" if self.narration.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -221,6 +227,7 @@ impl<'de> Deserialize<'de> for ThinkingContent {
 			thinking: take(&mut extra, "thinking"),
 			thinking_signature: take(&mut extra, "thinkingSignature"),
 			item_id: take(&mut extra, "itemId"),
+			narration: take(&mut extra, "narration"),
 			extra,
 		})
 	}
@@ -2906,6 +2913,9 @@ pub struct QueuedMessagesState {
 	pub steering: Vec<String>,
 	#[serde(rename = "followUp")]
 	pub follow_up: Vec<String>,
+	/// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
+	#[serde(rename = "liveSteered", default = "default_queued_messages_state_live_steered")]
+	pub live_steered: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3150,6 +3160,8 @@ pub struct CompactionResult {
 	pub details: Option<Value>,
 	#[serde(rename = "preserveData", default, skip_serializing_if = "Option::is_none")]
 	pub preserve_data: Option<Map<String, Value>>,
+	#[serde(rename = "providerReplayThroughEntryId", default, skip_serializing_if = "Option::is_none")]
+	pub provider_replay_through_entry_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3588,7 +3600,11 @@ impl NotifyType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentStartEvent {}
+pub struct AgentStartEvent {
+	/// Calls of an unpaired assistant tail a continued run executes before its first model request.
+	#[serde(rename = "resumedToolCallIds", default, skip_serializing_if = "Option::is_none")]
+	pub resumed_tool_call_ids: Option<Vec<String>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentEndEvent {
@@ -3846,6 +3862,9 @@ pub struct QueueUpdateEvent {
 	pub steering: Vec<String>,
 	#[serde(rename = "followUp")]
 	pub follow_up: Vec<String>,
+	/// Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.
+	#[serde(rename = "liveSteered", default = "default_queue_update_event_live_steered")]
+	pub live_steered: i64,
 }
 
 /// A session event, discriminated by `type`; `set_event_filter` selects which are sent.
@@ -5759,6 +5778,10 @@ impl HostUriResultContentType {
 	}
 }
 
+fn default_queued_messages_state_live_steered() -> i64 {
+	serde_json::from_str("0").expect("valid wire default")
+}
+
 fn default_session_state_is_streaming() -> bool {
 	serde_json::from_str("false").expect("valid wire default")
 }
@@ -5820,7 +5843,7 @@ fn default_session_state_is_settled() -> bool {
 }
 
 fn default_session_state_queued_messages() -> QueuedMessagesState {
-	serde_json::from_str("{\"steering\":[],\"followUp\":[]}").expect("valid wire default")
+	serde_json::from_str("{\"steering\":[],\"followUp\":[],\"liveSteered\":0}").expect("valid wire default")
 }
 
 fn default_session_state_todo_phases() -> Vec<TodoPhase> {
@@ -5845,6 +5868,10 @@ fn default_token_usage_reasoning() -> i64 {
 
 fn default_auto_retry_end_event_retry_errors() -> Vec<Map<String, Value>> {
 	serde_json::from_str("[]").expect("valid wire default")
+}
+
+fn default_queue_update_event_live_steered() -> i64 {
+	serde_json::from_str("0").expect("valid wire default")
 }
 
 fn default_ask_question_multi() -> bool {

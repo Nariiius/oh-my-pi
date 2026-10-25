@@ -606,6 +606,22 @@ export class PlanReviewOverlay implements Component {
 		slider.onChange?.(next);
 	}
 
+	/** Synchronize an external tier pick with the displayed slider before committing. */
+	setSliderIndex(index: number): void {
+		if (this.#committed || !this.#slider) return;
+		this.#moveSlider(index - this.#sliderIndex);
+	}
+
+	/** Commit an external answer through the same input-locking path as Enter; false when nothing was committed. */
+	selectOption(label: string): boolean {
+		if (this.#committed) return false;
+		const index = this.#options.indexOf(label);
+		if (index < 0 || this.#disabled.has(index)) return false;
+		this.#selectedIndex = index;
+		this.#confirmSelection();
+		return this.#committed;
+	}
+
 	#confirmSelection(): void {
 		const index = this.#selectedIndex;
 		if (index >= 0 && index < this.#options.length && !this.#disabled.has(index)) {
@@ -1607,7 +1623,7 @@ export class PlanReviewOverlay implements Component {
 		return this.#nativeRoot;
 	}
 
-	/** Head tools: Copy `c` and the external editor, mirroring their keys. */
+	/** Head tools: Copy `c`, the external editor and Cancel, mirroring their keys. */
 	#describeTools(): NativeNode | undefined {
 		if (this.#committed) return undefined;
 		const buttons: NativeNode[] = [];
@@ -1618,6 +1634,12 @@ export class PlanReviewOverlay implements Component {
 		if (this.callbacks.onExternalEditor) {
 			buttons.push(actionButton("Edit in $EDITOR", "externalEditor", editorKeyId ? { keys: editorKeyId } : {}));
 		}
+		// Cancel the review the way the cancel key does; while annotating that key
+		// only leaves the draft/chooser, so the button is hidden there.
+		if (!this.#annotating && !this.#annotationChooser) {
+			const cancelKeyId = getKeybindings().getKeys("tui.select.cancel")[0];
+			buttons.push(actionButton("Cancel", "cancel", cancelKeyId ? { keys: cancelKeyId } : {}));
+		}
 		if (buttons.length === 0) return undefined;
 		return node("row", { role: "omp.plan.tools", gap: "sm", align: "center", justify: "end" }, buttons, "tools");
 	}
@@ -1625,12 +1647,15 @@ export class PlanReviewOverlay implements Component {
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (this.#committed) return;
 		if (event.type === "action") {
-			// Head tools run exactly what `c` and the external-editor key run.
+			// Head tools run exactly what `c`, the external-editor key and Esc run.
 			if (this.#annotating || this.#annotationChooser) return;
 			if (event.act === "copyPlan" && this.callbacks.onCopyPlan) {
 				void this.callbacks.onCopyPlan(joinPlanSections(this.#sections));
 			} else if (event.act === "externalEditor") {
 				this.callbacks.onExternalEditor?.();
+			} else if (event.act === "cancel") {
+				this.#committed = true;
+				this.callbacks.onCancel();
 			}
 			return;
 		}

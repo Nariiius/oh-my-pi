@@ -103,6 +103,12 @@ export interface XdevDispatch {
 	 * calls when deciding the model hand-off (issue #7312).
 	 */
 	tier?: ToolTier;
+	/**
+	 * The wrapped MCP tool declared itself read-only (`annotations.readOnlyHint`).
+	 * Captured at dispatch so the prewalk coordinator classifies the tool that ran,
+	 * not whatever a later MCP tool refresh put under its name.
+	 */
+	readOnlyHint?: true;
 	/** Details object returned by the wrapped tool, when executed. */
 	inner?: unknown;
 }
@@ -460,6 +466,7 @@ export async function dispatchXdevTool(
 			tier = undefined;
 		}
 		xdev = { ...xdev, args: validated, tier };
+		if ("mcpReadOnlyHint" in canonical && canonical.mcpReadOnlyHint === true) xdev.readOnlyHint = true;
 		const innerOnUpdate: AgentToolUpdateCallback | undefined = onUpdate
 			? partial =>
 					onUpdate({

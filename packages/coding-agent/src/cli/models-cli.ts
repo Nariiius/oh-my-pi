@@ -18,7 +18,7 @@
 import { type Api, completeSimple, type Effort, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
-import { canonicalizeProvider, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
+import { canonicalizeProvider, getEffectiveTokenCost, getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatCompactAccountEmail, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
@@ -152,6 +152,8 @@ export function filterModelsByPattern(models: Model<Api>[], pattern: string | un
 }
 
 function toModelJson(model: Model<Api>): ModelJson {
+	// Scalar legs report the card in force now, not the one current when the row was built.
+	const { input, output, cacheRead, cacheWrite } = getEffectiveTokenCost(model.cost);
 	return {
 		provider: model.provider,
 		kind: modelKind(model),
@@ -163,7 +165,7 @@ function toModelJson(model: Model<Api>): ModelJson {
 		reasoning: model.reasoning,
 		thinking: model.thinking ? getSupportedEfforts(model) : null,
 		input: model.input,
-		cost: model.cost,
+		cost: { ...model.cost, input, output, cacheRead, cacheWrite },
 		pricingStatus: getModelPricingStatus(model),
 	};
 }

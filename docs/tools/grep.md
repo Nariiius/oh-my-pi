@@ -42,7 +42,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
   - `matchCount`, `fileCount`, `files`, `fileMatches` — counts for the returned page.
   - `fileLimitReached` — more matching files remain beyond the current 20-file page.
   - `perFileLimitReached` — a hot file was trimmed to the per-file match cap.
-  - `linesTruncated` — one or more matched lines exceeded the `512`-byte UTF-8 budget; native output keeps a character-boundary-safe prefix plus `...` within that budget.
+  - `linesTruncated` — one or more matched lines exceeded the `512`-byte UTF-8 budget. Native output keeps the line's head plus `...` when the first match fits there; otherwise it keeps a window centred on that match with `...` on each cut side (e.g. `*1|...aaaadeadline [s120]bbbb... [col 12001]`). A cut match line ends with `[col N]`, the 1-indexed character column where its first match starts. Context lines keep the head plus `...`.
   - `truncated` — any file/match/native/line/output limit was reached; `truncation` and `meta.truncation` describe final byte truncation by `truncateHead()`.
   - `displayContent` — TUI-only rendering text with `│` gutters instead of model anchors.
   - `missingPaths` — multi-path entries skipped because their base path did not exist.
@@ -89,7 +89,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 12. Native result paths are root-relative with raw entry names; below a URL root `resolveSearchResultPath()` joins them back into full URLs with percent-encoded segments (`local://notes/a%20b.md`). Archive scratch paths are remapped back to user-facing selectors before rendering.
 13. JS output shaping then:
    - caps multi-file output to 20 files per page (`DEFAULT_FILE_LIMIT`), using `skip` as the next file offset;
-   - caps matches per file to 20 for multi-file scopes and 200 for single-file scopes;
+   - caps matches per file to 20 for multi-file scopes and 200 for single-file scopes, and names the rendered files the cap trimmed in a closing line placed past the byte cap (`More than 20 matches in a.ts; grep keeps the first 20 per file when searching several. Search one file alone for up to 200.`; a single file gets `More than 200 matches; …` with a line-range hint). The page label's total reads `N+` only when native grep stopped at `INTERNAL_TOTAL_CAP`, not when a per-file cap bit;
    - round-robins selected per-file matches so one file does not monopolize the page;
    - formats lines through `formatMatchLine()` for the model and `formatCodeFrameLine()` for TUI;
    - in hashline mode, calls `getEditStore(session).recordSnapshotFile()` for each eligible rendered file to mint the `#TAG` anchor, then records emitted lines with `recordSeenLinesFromBody()`. Archive entries, immutable external materializations, and immutable URL schemes are skipped; a mutable file-backed URL (`local://`) is snapshotted against its backing host file (`resultSnapshotPath()`). Files too large or unreadable for snapshots fall back to plain line output.
@@ -135,7 +135,7 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - File page limit: `20` files (`DEFAULT_FILE_LIMIT` in `packages/coding-agent/src/tools/grep.ts`).
 - Per-file match caps: `20` for multi-file scopes (`MULTI_FILE_PER_FILE_MATCHES`), `200` for single-file scopes (`SINGLE_FILE_MATCHES`).
 - Ordinary native preselection cap: `2000` matches per invocation (`INTERNAL_TOTAL_CAP`). Line-range filters increase the fetch caps before JS filtering.
-- Line truncation: `512` UTF-8 bytes per emitted line, including the native `...` marker (`DEFAULT_MAX_COLUMN` in `packages/tui/src/tools/streaming-output.ts`). Native grep marks truncated matches; JS reports `linesTruncated`.
+- Line truncation: `512` UTF-8 bytes per emitted line content, including the native `...` markers but not the line prefix or `[col N]` suffix (`DEFAULT_MAX_COLUMN` in `packages/tui/src/tools/streaming-output.ts`). Native grep windows a cut match line around the first match the searcher found (re-run over the search buffer from the line's start, as ripgrep's printer does) and reports its `column`; JS reports `linesTruncated`.
 - Final text truncation: `truncateHead()` default byte cap `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/tui/src/tools/streaming-output.ts`). `grep.ts` overrides `maxLines` to `Number.MAX_SAFE_INTEGER`, so normal grep output is byte-capped, not line-capped.
 - Context defaults: `grep.contextBefore = 1`, `grep.contextAfter = 3` in `packages/coding-agent/src/tools/settings.ts`.
 - Pagination: `skip` is a file-page offset for multi-file scopes. The result text says `Use skip=<N> for the next page` when more files remain.

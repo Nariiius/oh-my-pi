@@ -5,6 +5,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AutocompleteProvider,
 	type Component,
+	emergencyTerminalRestore,
 	matchesKey,
 	parseSgrMouse,
 	type PasteOptions,
@@ -17,6 +18,7 @@ import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-role
 import { resolveModelRoleValue } from "../../config/model-resolver";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { InternalUrlRouter, resolveLocalRoot } from "../../internal-urls";
+import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { extractImagePathFromText } from "@oh-my-pi/pi-tui/prompt/custom-editor";
@@ -33,7 +35,7 @@ import {
 	shiftImageMarkers,
 } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { expandEmoticons } from "@oh-my-pi/pi-tui/prompt/emoji-autocomplete";
-import { materializeImageReferenceLinks, setCachedImageDimensions } from "@oh-my-pi/pi-tui/prompt/image-references";
+import { setCachedImageDimensions } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
 import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
 import { createModelBrowserSource } from "../model-browser-source";
@@ -63,7 +65,9 @@ import {
 import { commandUsage, hintUsage } from "../../utils/usage-counter";
 import { EnhancedPasteController } from "../../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
+import { resendProgramStatus } from "../../utils/run-status";
 import { loadImageInput } from "../../utils/image-loading";
+import { materializeImageChipLinks } from "../utils/ui-helpers";
 import { ensureSupportedImageInput, ImageInputTooLargeError } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { type ImageAttachmentSource, tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
@@ -163,13 +167,22 @@ const SHELL_PROMPT_OPERATOR_RE = /(?:^|\s)(?:&&|\|\||\||2>&1|[<>]{1,2})(?:\s|$)/
 const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s+\S+\s+tok\/s:\s+\S+/m;
 
 /**
- * Read-only slash commands that also run from a focused subagent view, keyed by name to
- * a check on their arguments; every other command (and mutating forms such as
- * `/usage reset`, which spends a saved rate-limit reset) still needs the main session.
+ * Slash commands that also run from a focused subagent view, keyed by canonical name to
+ * a check on their arguments: viewer-scoped reads, plus the model and effort controls,
+ * which act on the focused agent's session. Every other command (and mutating forms such
+ * as `/usage reset`, which spends a saved rate-limit reset, or `/jobs kill`, which cancels
+ * a running job) still needs the main session.
  */
 const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 	btw: () => true,
+	effort: () => true,
 	export: () => true,
+	jobs: args => {
+		const { verb, rest } = parseSubcommand(args);
+		return !verb || (verb === "full" && !rest);
+	},
+	model: () => true,
+	switch: () => true,
 	usage: args => {
 		const { verb, rest } = parseSubcommand(args);
 		return !verb || (verb === "show" && !rest);
@@ -442,6 +455,10 @@ export class InputController {
 				if (focused instanceof AskDialogComponent && focused.toggleQuestionExpansion()) {
 					return { consume: true };
 				}
+				// Likewise an approval prompt that summarized its call's details.
+				if (focused instanceof ApprovalDialogComponent && focused.toggleDetails()) {
+					return { consume: true };
+				}
 				this.toggleToolOutputExpansion();
 				return { consume: true };
 			});
@@ -670,7 +687,7 @@ export class InputController {
 		}
 
 		for (const key of this.ctx.keybindings.getKeys("app.session.new")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleClearCommand());
+			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleNewCommand());
 		}
 		for (const key of this.ctx.keybindings.getKeys("app.session.tree")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showTreeSelector());
@@ -728,6 +745,9 @@ export class InputController {
 
 		this.ctx.editor.onChange = (text: string) => {
 			this.#draftText = text;
+			// Typing signals an imminent turn; refresh the API connection now so
+			// the handshake overlaps composition instead of delaying the send.
+			if (text) this.ctx.session.prewarmModelConnection();
 			const wasBashMode = this.ctx.isBashMode;
 			const wasPythonMode = this.ctx.isPythonMode;
 			const trimmed = text.trimStart();
@@ -932,10 +952,7 @@ export class InputController {
 		if (result?.text !== undefined) text = result.text.trim();
 		if (result?.images !== undefined) {
 			images = result.images;
-			imageLinks = await materializeImageReferenceLinks(
-				images,
-				this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager),
-			);
+			imageLinks = await materializeImageChipLinks(images, this.ctx.sessionManager);
 		}
 		if (!text && !images?.length) return undefined;
 		return { text, images, imageLinks };
@@ -954,8 +971,9 @@ export class InputController {
 
 			// Focused subagent session: the editor is a plain chat box for it.
 			// Everything below (slash/bash/python, loop,
-			// compaction queueing) is main-session-only.
-			if (this.ctx.focusedAgentId) {
+			// compaction queueing) is main-session-only. A tool-approval dialog
+			// owning the composer is the main session's, so its draft steers main.
+			if (this.ctx.focusedAgentId && !this.ctx.approvalOwnsComposer) {
 				await this.#submitToFocusedSession(text, "steer");
 				return;
 			}
@@ -1001,6 +1019,8 @@ export class InputController {
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
 			const submittedImages = inputImages;
 
+			// A startup-deferred extension's input hook must see the first submission.
+			if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
 			if (runner?.hasHandlers("input")) {
 				const input = await this.#runInputHandlers(text, inputImages, inputImageLinks);
 				if (!input) {
@@ -1295,10 +1315,6 @@ export class InputController {
 					},
 					{ clearEditor: false },
 				);
-				// Start titling only after the optimistic row painted, so the local
-				// tiny-title worker's subprocess spawn never blocks the first frame.
-				this.#maybeStartTitleGeneration(text);
-
 				this.ctx.onInputCallback(submission);
 			} else {
 				// No input waiter: the main loop is between turns (post-turn
@@ -1312,7 +1328,6 @@ export class InputController {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 				this.ctx.editor.pendingImages = [];
 				this.ctx.editor.pendingImageLinks = [];
-				this.#maybeStartTitleGeneration(text);
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
@@ -1408,11 +1423,7 @@ export class InputController {
 		);
 	}
 
-	/**
-	 * Kick off session-title generation after the optimistic user row paints.
-	 * Local extension commands are consumed before reaching the shared session
-	 * title gate and must not name the conversation.
-	 */
+	/** Whether `text` invokes a registered extension command, which runs locally instead of prompting the model. */
 	#isLocalExtensionCommand(text: string): boolean {
 		const extensionCommandSpace = text.indexOf(" ");
 		return (
@@ -1421,13 +1432,6 @@ export class InputController {
 				extensionCommandSpace === -1 ? text.slice(1) : text.slice(1, extensionCommandSpace),
 			) !== undefined
 		);
-	}
-
-	#maybeStartTitleGeneration(text: string): void {
-		if (this.#isLocalExtensionCommand(text)) {
-			return;
-		}
-		this.ctx.session.maybeStartTitleGeneration(text);
 	}
 
 	/** Submit editor text to the focused subagent session (chat and continue shortcuts only). */
@@ -1447,9 +1451,12 @@ export class InputController {
 		}
 		if (text?.startsWith("/")) {
 			const parsed = parseSlashCommand(text);
-			if (parsed && FOCUSED_VIEW_COMMANDS[parsed.name]?.(parsed.args)) {
+			const name = parsed && lookupBuiltinSlashCommand(parsed.name)?.name;
+			if (parsed && name && FOCUSED_VIEW_COMMANDS[name]?.(parsed.args)) {
 				// Viewer-scoped commands: /btw asks about the focused transcript, /export
-				// writes it (with its own subagents), /usage reports account-wide limits.
+				// writes it (with its own subagents), /jobs lists the focused agent's jobs
+				// without a way to cancel them, /usage reports account-wide limits, and
+				// /model, /switch, /effort change the focused agent's model and thinking.
 				this.#recordSlashCommandUsage(text);
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx })) === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
@@ -1513,7 +1520,11 @@ export class InputController {
 		if (this.ctx.isShuttingDown) {
 			// Route through postmortem: this hard-abort can fire while an
 			// extension-load guard window is open, where raw process.exit is a
-			// throwing ExtensionExitError stub (#11789).
+			// throwing ExtensionExitError stub (#11789). exitProcess skips the
+			// postmortem cleanups, so hand the terminal back first: shutdown() has
+			// not reached ui.stop() yet, and a kitty keyboard frame left pushed
+			// makes the parent shell receive Ctrl+C as `CSI 99;5u` (prints `9;5u`).
+			emergencyTerminalRestore();
 			postmortem.exitProcess(130); // 128 + SIGINT
 		}
 
@@ -1569,6 +1580,7 @@ export class InputController {
 			clearInterval(suspendKeepalive);
 			this.ctx.ui.start();
 			this.ctx.ui.requestRender(true);
+			resendProgramStatus();
 		};
 		process.once("SIGCONT", onResume);
 
@@ -1876,7 +1888,7 @@ export class InputController {
 		if (!text && !images) return;
 
 		// Focused subagent session: follow-ups go to it; non-chat input is gated.
-		if (this.ctx.focusedAgentId) {
+		if (this.ctx.focusedAgentId && !this.ctx.approvalOwnsComposer) {
 			await this.#submitToFocusedSession(text, "followUp");
 			return;
 		}
@@ -1885,6 +1897,7 @@ export class InputController {
 		// same draft, and later typing belongs to the next submission.
 		this.ctx.editor.clearDraft();
 
+		if (this.ctx.session.hasPendingDeferredExtensions) await this.ctx.session.loadDeferredExtensions();
 		if (this.ctx.session.extensionRunner?.hasHandlers("input")) {
 			try {
 				const input = await this.#runInputHandlers(text, images, imageLinks);
@@ -2050,13 +2063,9 @@ export class InputController {
 		const image: ImageContent = source
 			? tagImageAttachmentSource(imageData, source.path, source.kind)
 			: { type: "image", data: imageData.data, mimeType: imageData.mimeType };
-		// File-backed attachments link to their file (so the chip opens it); payloads
-		// without one (a failed clipboard persist) materialize a clickable blob copy.
-		const imageLink =
-			source?.path ??
-			(
-				await materializeImageReferenceLinks([image], this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager))
-			)?.[0];
+		// The source URL stays on the image for the model; the chip opens the file itself,
+		// or a stable blob copy of the original bytes behind an internal URL (else the payload).
+		const [imageLink] = await materializeImageChipLinks([image], this.ctx.sessionManager);
 		this.ctx.editor.pendingImages.push(image);
 		this.ctx.editor.pendingImageLinks.push(imageLink);
 		this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
@@ -2656,6 +2665,7 @@ export class InputController {
 					cwd: manager.getCwd(),
 					sessionId: manager.getSessionId(),
 					sessionFile: manager.getSessionFile(),
+					seanceSourceArtifactsDir: manager.getSeanceSourceArtifactsDir() ?? undefined,
 				};
 			},
 			keybindings: this.ctx.keybindings,
@@ -2705,13 +2715,7 @@ export class InputController {
 	}
 
 	cycleThinkingLevel(): void {
-		if (this.ctx.focusedAgentId) {
-			this.ctx.showStatus(
-				`Model/thinking apply to the main session — press ${formatDoubleTap("left")} to return first`,
-			);
-			return;
-		}
-		const newLevel = this.ctx.session.cycleThinkingLevel();
+		const newLevel = this.ctx.viewSession.cycleThinkingLevel();
 		if (newLevel === undefined) {
 			this.ctx.showStatus("Current model does not support thinking");
 		} else {
@@ -2722,15 +2726,9 @@ export class InputController {
 	}
 
 	async cycleRoleModel(direction: "forward" | "backward" = "forward"): Promise<void> {
-		if (this.ctx.focusedAgentId) {
-			this.ctx.showStatus(
-				`Model/thinking apply to the main session — press ${formatDoubleTap("left")} to return first`,
-			);
-			return;
-		}
 		try {
 			const cycleOrder = cfgCycleOrder.get(settings);
-			const result = await this.ctx.session.cycleRoleModels(cycleOrder, direction);
+			const result = await this.ctx.viewSession.cycleRoleModels(cycleOrder, direction);
 			if (!result) {
 				this.ctx.showStatus("Only one role model available");
 				return;

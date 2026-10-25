@@ -292,6 +292,23 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		expect(malformedRecords).toBe(1);
 	});
 
+	it("ends at a byte limit well inside the file when no record completes before it", async () => {
+		// No line completes within the 1 MiB limit, and the file continues for ~700 KB past it.
+		const content = `{\n  "results": [\n${'    "row",\n'.repeat(160_000)}    "end"\n  ]\n}\n`;
+		const file = await writeTemp(content);
+		let bytesRead = 0;
+
+		await sessionLoader.visitEntriesFromFileStream(file, () => {}, {
+			maxBytes: 1024 * 1024,
+			onBytesConsumed: bytes => {
+				bytesRead += bytes;
+			},
+		});
+
+		expect(bytesRead).toBe(1024 * 1024);
+		expect(await sessionLoader.readSessionHeaderId(file)).toBeUndefined();
+	});
+
 	it("stops after the first chunk of a delimiter-free file when the record cap is zero", async () => {
 		// No newline until EOF: the streaming loop's delimiter-free fast path skips
 		// the parser, so the record cap has to be enforced before buffering or the
@@ -347,6 +364,52 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 
 		expect(entryIds(loaded.entries)).toEqual(["s1", "tail"]);
 		expect(loaded.malformedRecords).toBe(1);
+	});
+
+	it("counts a truncated header-only file as malformed and an invalid header", async () => {
+		// Cut mid-value: parseChunk reports "incomplete", not a syntax error, so the
+		// fragment used to vanish without being counted (parseJsonlLenient counts it).
+		const content = JSON.stringify(HEADER).slice(0, 30);
+		const file = await writeTemp(content);
+		const loaded = await sessionLoader.loadEntriesFromFileStream(file);
+		const lenient = sessionLoader.parseSessionContent(content);
+
+		expect(loaded.entries).toEqual([]);
+		expect(loaded.malformedRecords).toBe(1);
+		expect(loaded.invalidHeader).toBe(true);
+		expect({ malformed: loaded.malformedRecords, invalid: loaded.invalidHeader }).toEqual({
+			malformed: lenient.malformedRecords,
+			invalid: lenient.invalidHeader,
+		});
+	});
+
+	it("counts an unterminated truncated tail record at end of file", async () => {
+		const tail = JSON.stringify(msg("tail", "s1", "cut short")).slice(0, 40);
+		const content = `${JSON.stringify(HEADER)}\n${tail}`;
+		const file = await writeTemp(content);
+		const loaded = await sessionLoader.loadEntriesFromFileStream(file);
+
+		expect(entryIds(loaded.entries)).toEqual(["s1"]);
+		expect(loaded.malformedRecords).toBe(1);
+		expect(loaded.malformedRecords).toBe(sessionLoader.parseSessionContent(content).malformedRecords);
+	});
+
+	it("counts an incomplete value left by the byte limit", async () => {
+		const prefix = `${JSON.stringify(HEADER)}\n`;
+		// Same record and cut as the EOF test above, but the file continues past the cap.
+		const record = JSON.stringify(msg("tail", "s1", "cut short"));
+		const file = await writeTemp(`${prefix}${record}\n${prefix}`);
+		const visited: FileEntry[] = [];
+		let malformedRecords = 0;
+		await sessionLoader.visitEntriesFromFileStream(file, entry => void visited.push(entry), {
+			maxBytes: Buffer.byteLength(prefix) + 40,
+			onMalformedRecord: () => {
+				malformedRecords++;
+			},
+		});
+
+		expect(entryIds(visited)).toEqual(["s1"]);
+		expect(malformedRecords).toBe(1);
 	});
 
 	it("returns empty for a missing file (ENOENT)", async () => {

@@ -23,7 +23,7 @@ import {
 } from "@oh-my-pi/pi-utils/ar";
 import { normalizeToLF } from "../edit/normalize";
 
-import { InternalUrlRouter, sessionResolveContext, sessionWriteContext } from "../internal-urls";
+import { extractUriScheme, InternalUrlRouter, sessionResolveContext, sessionWriteContext } from "../internal-urls";
 import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
 
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
@@ -35,7 +35,8 @@ import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" w
 import type { ToolSession } from "../sdk";
 
 import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
-import { truncateForPrompt } from "./approval";
+import { formatApprovalArguments, truncateForPrompt } from "./approval";
+import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
@@ -69,7 +70,12 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
 
-import { cfgLspDiagnosticsDeduplicate, cfgLspDiagnosticsOnWrite, cfgLspFormatOnWrite } from "../lsp/settings";
+import {
+	cfgLspDiagnosticsDeduplicate,
+	cfgLspDiagnosticsOnWrite,
+	cfgLspFormatOnWrite,
+	cfgLspRequestTimeout,
+} from "../lsp/settings";
 
 const EXECUTABLE_NOTICE = "[Notice: Made executable via chmod +x]";
 const URI_LIKE_WRITE_PATH_RE = /^([a-z][a-z0-9+.-]*):\/{1,2}(.*)$/i;
@@ -355,7 +361,7 @@ function emitWriteProgress(
 }
 
 /**
- * If `content` begins with a `#!` shebang, ensure the file is executable.
+ * If `content` begins with an interpreter shebang (not a Rust inner attribute), ensure the file is executable.
  *
  * Mirrors `chmod a+x` (adds user/group/other execute bits to existing mode).
  * Errors are swallowed: chmod failure (e.g. Windows ACL, read-only mount)
@@ -364,7 +370,7 @@ function emitWriteProgress(
  * since Windows (and some mounts) accept it while keeping no execute bits.
  */
 async function maybeMarkExecutableForShebang(absolutePath: string, content: string): Promise<boolean> {
-	if (!content.startsWith("#!")) return false;
+	if (!content.startsWith("#!") || content.startsWith("#![")) return false;
 	try {
 		const stat = await fs.stat(absolutePath);
 		const currentMode = stat.mode & 0o7777;
@@ -474,7 +480,27 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const params = args as Partial<WriteParams>;
 		const targetPath = typeof params.path === "string" ? params.path : "(missing)";
 		const content = typeof params.content === "string" ? params.content : "";
+		const unwrapped = unwrapHashlineHeaderPath(targetPath);
+		if (extractUriScheme(unwrapped) === "xd") {
+			try {
+				const parsed: unknown = JSON.parse(content);
+				return [`Path: ${truncateForPrompt(targetPath)}`, ...formatApprovalArguments(parsed, { showEmpty: true })];
+			} catch {
+				// Non-JSON payload falls back to raw content
+			}
+		}
 		return [`Path: ${truncateForPrompt(targetPath)}`, `Content:\n${truncateForPrompt(content)}`];
+	};
+	/**
+	 * `always-ask-cached` key: the path this write targets, unwrapped from a
+	 * hashline `[path#TAG]` header exactly like the approval tier above, so all
+	 * writes to one file share a single grant.
+	 */
+	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
+		const rawPath = (args as Partial<WriteParams> | null | undefined)?.path;
+		if (typeof rawPath !== "string" || rawPath.length === 0) return undefined;
+		const key = approvalTargetKey(this.session.cwd, unwrapHashlineHeaderPath(rawPath));
+		return key === undefined ? undefined : [key];
 	};
 	readonly label = "Write";
 	get description(): string {
@@ -510,6 +536,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			transformDiagnostics: dedup
 				? (path, result) => getDiagnosticsLedger(this.session).reduce(path, result)
 				: undefined,
+			requestTimeoutSec: cfgLspRequestTimeout.get(settings),
 		});
 		return { writethrough, deferred: enableDiagnostics ? this.#deferredDiagnostics : undefined };
 	}
@@ -790,21 +817,28 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const coordination =
 			policy?.scope === "coordination" || (target !== undefined && policy?.cancels?.(target.url) === true);
 		// A device-only session grants `write` purely as the device transport (see
-		// createTools): device dispatches and coordination writes proceed, every
-		// other target is rejected before any handler, guard, conflict resolver, or
-		// bridge sees it. Active plan mode additionally permits its sandbox, but does
-		// not relax the restriction for working-tree or other internal URLs.
+		// createTools): device dispatches, coordination writes, and the session's
+		// local:// sandbox proceed; every other target is rejected before any
+		// handler, guard, conflict resolver, or bridge sees it.
 		if (
 			this.session.deviceOnlyWrite === true &&
 			policy?.scope !== "device" &&
 			!coordination &&
-			!(
-				this.session.getPlanModeState?.()?.enabled === true &&
-				(await targetsLocalSandbox(this.session, path, signal))
-			)
+			!(await targetsLocalSandbox(this.session, path, signal))
 		) {
+			// A device-only session that still has `yield` is the read-only subagent
+			// shape: `write` is present only as the xd:// transport, yet the parent's
+			// briefing names a file path. Without naming the channel that does work,
+			// the rejection reads as a dead end (#14308). Keyed on `yield` being
+			// active rather than on an `isReadOnlyAgent` flag, which never reaches
+			// this session: a caller without `yield` keeps today's message verbatim.
+			const yieldFallback =
+				this.session.isToolActive?.("yield") === true
+					? " To deliver results to the caller, return the content in `yield` instead."
+					: "";
 			throw new ToolError(
-				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
+				"This `write` tool is limited to the xd:// device transport and local:// session scratch: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices), or write a `local://<name>` file. Filesystem writes are not available elsewhere." +
+					yieldFallback,
 			);
 		}
 		return untilAborted(signal, async () => {

@@ -27,6 +27,7 @@ import { IssueProtocolHandler, PrProtocolHandler } from "./issue-pr-protocol";
 import { LocalProtocolHandler } from "./local-protocol";
 import { McpProtocolHandler } from "./mcp-protocol";
 import { MemoryProtocolHandler } from "./memory-protocol";
+import { MrProtocolHandler } from "./mr-protocol";
 import { OmpProtocolHandler } from "./omp-protocol";
 import { extractUriScheme, parseInternalUrl } from "./parse";
 import { ProcProtocolHandler } from "./proc-protocol";
@@ -118,6 +119,7 @@ export class InternalUrlRouter {
 		this.register(new VaultProtocolHandler());
 		this.register(new IssueProtocolHandler());
 		this.register(new PrProtocolHandler());
+		this.register(new MrProtocolHandler());
 		this.register(resourceFallback);
 		this.register(new OmpProtocolHandler());
 		this.register(new XdProtocolHandler());
@@ -317,7 +319,7 @@ export class InternalUrlRouter {
 		context?: ResolveContext,
 		options?: LocateOptions,
 	): Promise<string> {
-		const located = await this.locate(input, context, options);
+		const located = await this.locate(input, context, { ...options, localOnly: true });
 		if (located !== null) return located;
 		const registered = this.#registered(input);
 		const spec = registered?.handler.spec;

@@ -97,12 +97,6 @@ pub enum FollowLinks {
 	Always,
 }
 
-impl From<bool> for FollowLinks {
-	fn from(follow: bool) -> Self {
-		if follow { Self::Always } else { Self::Never }
-	}
-}
-
 impl FollowLinks {
 	const fn follow_at_depth(self, depth: usize) -> bool {
 		match self {
@@ -339,56 +333,40 @@ impl WalkFilter {
 	}
 
 	fn accepts_collected(&self, entry: &CollectedEntry) -> bool {
-		if self.skip_node_modules_unless_seen
-			&& !self.mentions_node_modules
-			&& entry
-				.path
-				.split('/')
-				.any(|component| component == "node_modules")
-		{
-			return false;
-		}
-		if self.max_file_size.is_some_and(|max| {
-			entry.file_type == FileType::File && entry.size.is_some_and(|size| size > max as f64)
-		}) {
-			return false;
-		}
-		let accepts_kind = match self.kind {
-			WalkFilterKind::All => true,
-			WalkFilterKind::Files => entry.file_type == FileType::File,
-			WalkFilterKind::Dirs => entry.file_type == FileType::Dir,
-		};
-		accepts_kind && self.accepts_path(&entry.path)
+		self.decision(&entry.path, entry.file_type, entry.size) == WalkDecision::Include
 	}
 
 	fn stream_decision(&self, meta: &EntryMeta<'_>) -> WalkDecision {
+		self.decision(meta.relative_path, meta.file_type, meta.size)
+	}
+
+	fn decision(&self, relative_path: &str, file_type: FileType, size: Option<f64>) -> WalkDecision {
 		if self.skip_node_modules_unless_seen
 			&& !self.mentions_node_modules
-			&& meta
-				.relative_path
+			&& relative_path
 				.split('/')
 				.any(|component| component == "node_modules")
 		{
-			return if meta.file_type == FileType::Dir {
+			return if file_type == FileType::Dir {
 				WalkDecision::SkipDescend
 			} else {
 				WalkDecision::Skip
 			};
 		}
 		if self.max_file_size.is_some_and(|max| {
-			meta.file_type == FileType::File && meta.size.is_some_and(|size| size > max as f64)
+			file_type == FileType::File && size.is_some_and(|size| size > max as f64)
 		}) {
 			return WalkDecision::Skip;
 		}
 		let accepts_kind = match self.kind {
 			WalkFilterKind::All => true,
-			WalkFilterKind::Files => meta.file_type == FileType::File,
-			WalkFilterKind::Dirs => meta.file_type == FileType::Dir,
+			WalkFilterKind::Files => file_type == FileType::File,
+			WalkFilterKind::Dirs => file_type == FileType::Dir,
 		};
 		if !accepts_kind {
 			return WalkDecision::Skip;
 		}
-		if self.accepts_path(meta.relative_path) {
+		if self.accepts_path(relative_path) {
 			WalkDecision::Include
 		} else {
 			WalkDecision::Skip
@@ -524,6 +502,27 @@ pub enum WalkRank {
 	/// times. [`WalkRequest::collect_ranked_with_heartbeat`] requests full
 	/// metadata for this rank so fresh scans can populate the mtime field.
 	MtimeDescPathAsc,
+}
+
+impl WalkRank {
+	fn compare(
+		self,
+		left_path: &str,
+		left_mtime: Option<f64>,
+		right_path: &str,
+		right_mtime: Option<f64>,
+	) -> Ordering {
+		let mtime_order = match self {
+			Self::PathAsc => Ordering::Equal,
+			Self::MtimeDescPathAsc => match (left_mtime, right_mtime) {
+				(Some(left), Some(right)) => right.total_cmp(&left),
+				(Some(_), None) => Ordering::Less,
+				(None, Some(_)) => Ordering::Greater,
+				(None, None) => Ordering::Equal,
+			},
+		};
+		mtime_order.then_with(|| left_path.cmp(right_path))
+	}
 }
 
 /// Summary statistics for a high-level collection.
@@ -1271,20 +1270,7 @@ impl WalkRequest {
 	}
 
 	fn rank_entries(entries: &mut [CollectedEntry], rank: WalkRank) {
-		match rank {
-			WalkRank::PathAsc => entries.sort_by(|left, right| left.path.cmp(&right.path)),
-			WalkRank::MtimeDescPathAsc => entries.sort_by(Self::compare_mtime_desc_path_asc),
-		}
-	}
-
-	fn compare_mtime_desc_path_asc(left: &CollectedEntry, right: &CollectedEntry) -> Ordering {
-		let mtime_order = match (left.mtime, right.mtime) {
-			(Some(left_mtime), Some(right_mtime)) => right_mtime.total_cmp(&left_mtime),
-			(Some(_), None) => Ordering::Less,
-			(None, Some(_)) => Ordering::Greater,
-			(None, None) => Ordering::Equal,
-		};
-		mtime_order.then_with(|| left.path.cmp(&right.path))
+		entries.sort_by(|left, right| rank.compare(&left.path, left.mtime, &right.path, right.mtime));
 	}
 
 	fn effective_options(&self) -> WalkOptions {
@@ -2375,10 +2361,13 @@ struct RankedEntry {
 impl Ord for RankedEntry {
 	fn cmp(&self, other: &Self) -> Ordering {
 		match (self.rank, other.rank) {
-			(WalkRank::PathAsc, WalkRank::PathAsc) => self.entry.path.cmp(&other.entry.path),
-			(WalkRank::MtimeDescPathAsc, WalkRank::MtimeDescPathAsc) => {
-				WalkRequest::compare_mtime_desc_path_asc(&self.entry, &other.entry)
-			},
+			(WalkRank::PathAsc, WalkRank::PathAsc)
+			| (WalkRank::MtimeDescPathAsc, WalkRank::MtimeDescPathAsc) => self.rank.compare(
+				&self.entry.path,
+				self.entry.mtime,
+				&other.entry.path,
+				other.entry.mtime,
+			),
 			(WalkRank::PathAsc, WalkRank::MtimeDescPathAsc) => Ordering::Less,
 			(WalkRank::MtimeDescPathAsc, WalkRank::PathAsc) => Ordering::Greater,
 		}
@@ -2435,23 +2424,34 @@ impl EntryVisitor for RankedCollectVisitor<'_> {
 
 	fn visit(&mut self, entry: Entry<'_>) -> std::result::Result<WalkControl, Self::Error> {
 		self.scanned += 1;
-		let entry = CollectedEntry {
-			path:      entry.relative.to_string(),
-			file_type: entry.file_type,
-			mtime:     entry.mtime,
-			size:      entry.size,
-		};
-		if !self.filter.accepts_collected(&entry) {
+		// Collection filters emission only: even SkipDescend must keep scanning.
+		if self
+			.filter
+			.decision(entry.relative, entry.file_type, entry.size)
+			!= WalkDecision::Include
+		{
 			self.filtered += 1;
 			return Ok(WalkControl::Continue);
 		}
-		let candidate = RankedEntry { entry, rank: self.rank };
+		// Allocates the owned path; call only once the entry is retained.
+		let owned_candidate = || RankedEntry {
+			entry: CollectedEntry {
+				path:      entry.relative.to_string(),
+				file_type: entry.file_type,
+				mtime:     entry.mtime,
+				size:      entry.size,
+			},
+			rank:  self.rank,
+		};
 		if self.entries.len() < self.limit {
-			self.entries.push(candidate);
+			self.entries.push(owned_candidate());
 		} else if let Some(mut worst) = self.entries.peek_mut()
-			&& candidate < *worst
+			&& self
+				.rank
+				.compare(entry.relative, entry.mtime, &worst.entry.path, worst.entry.mtime)
+				== Ordering::Less
 		{
-			*worst = candidate;
+			*worst = owned_candidate();
 		}
 		Ok(WalkControl::Continue)
 	}
@@ -3998,14 +3998,15 @@ mod platform {
 		FileType, RawDirEntry, ReadDirControl, ReadDirError, WalkDetail, WalkError, mtime_millis,
 	};
 
-	/// `getattrlistbulk` can return data length in the same batch, but
-	/// requesting full-detail attributes (size + mtime) measurably slows the
-	/// bulk scan (~+50% walk time on APFS), which outweighs saving one fstat
-	/// per opened file. Benchmarked via `perf_walk_collect_full_detail` vs
-	/// minimal detail.
+	/// Full listings (`getattrlistbulk` with mtime + size) walk ~25–35%
+	/// slower on APFS than minimal `readdir` listings (`perf_walk_*` tree,
+	/// collect with gitignore), about what skipping one fstat per searched
+	/// file saves, so size hints are not requested by default.
 	pub const CHEAP_SIZE_HINTS: bool = false;
 
 	const BUFFER_SIZE: usize = 256 * 1024;
+	/// Attributes every record must carry to be listed.
+	const REQUIRED_COMMON_ATTRS: libc::attrgroup_t = libc::ATTR_CMN_NAME | libc::ATTR_CMN_OBJTYPE;
 	const VREG: u32 = 1;
 	const VDIR: u32 = 2;
 	const VLNK: u32 = 5;
@@ -4020,9 +4021,151 @@ mod platform {
 		}
 	}
 
+	/// Directory stream that owns the descriptor it was opened from.
+	struct DirGuard(*mut libc::DIR);
+
+	impl DirGuard {
+		fn from_fd(fd: FdGuard) -> io::Result<Self> {
+			// SAFETY: `fd` is an open directory descriptor; on success the
+			// stream takes ownership of it.
+			let dir = unsafe { libc::fdopendir(fd.0) };
+			if dir.is_null() {
+				return Err(io::Error::last_os_error());
+			}
+			std::mem::forget(fd);
+			Ok(Self(dir))
+		}
+	}
+
+	impl Drop for DirGuard {
+		fn drop(&mut self) {
+			// SAFETY: `DirGuard` owns this stream (and its descriptor) and
+			// closes it exactly once.
+			unsafe { libc::closedir(self.0) };
+		}
+	}
+
+	/// List one directory, opening it once.
+	///
+	/// Minimal listings go through `readdir`: libc fills its buffer with
+	/// `__getdirentries64`, which flags end-of-directory in the same call,
+	/// so a typical directory costs one listing syscall. A names-and-types
+	/// `getattrlistbulk` needs a trailing empty call and collected the
+	/// `perf_walk_*` tree 20–30% slower. Full listings use
+	/// `getattrlistbulk`, which returns mtimes and sizes without a stat per
+	/// entry.
 	pub fn read_dir_entries<F, E>(
 		path: &Path,
 		detail: WalkDetail,
+		buffer: &mut Vec<u8>,
+		mut emit: F,
+	) -> std::result::Result<ReadDirControl, ReadDirError<E>>
+	where
+		F: FnMut(RawDirEntry<'_>) -> std::result::Result<ReadDirControl, WalkError<E>>,
+	{
+		if detail == WalkDetail::Minimal {
+			return read_dirent_entries(path, emit);
+		}
+		let mut emitted = false;
+		let result = read_bulk_entries(path, buffer, |entry| {
+			emitted = true;
+			emit(entry)
+		});
+		match result {
+			// Fall back only before any entry was emitted, so a late failure
+			// cannot deliver entries twice.
+			Err(ReadDirError::Io(err)) if !emitted && is_unsupported_dir_scan(&err) => {
+				read_dir_entries_std(path, detail, emit)
+			},
+			result => result,
+		}
+	}
+
+	fn read_dirent_entries<F, E>(
+		path: &Path,
+		mut emit: F,
+	) -> std::result::Result<ReadDirControl, ReadDirError<E>>
+	where
+		F: FnMut(RawDirEntry<'_>) -> std::result::Result<ReadDirControl, WalkError<E>>,
+	{
+		let dir = DirGuard::from_fd(open_dir(path)?)?;
+		loop {
+			// `readdir` reports errors only through errno.
+			// SAFETY: `__error` returns this thread's errno slot.
+			unsafe { *libc::__error() = 0 };
+			// SAFETY: `dir` owns a valid open directory stream.
+			let entry = unsafe { libc::readdir(dir.0) };
+			if entry.is_null() {
+				let err = io::Error::last_os_error();
+				return match err.raw_os_error() {
+					Some(0) => Ok(ReadDirControl::Continue),
+					_ => Err(err.into()),
+				};
+			}
+			// SAFETY: `readdir` returned a valid entry that stays valid until
+			// the next `readdir` or `closedir` on `dir`.
+			let entry = unsafe { &*entry };
+			// SAFETY: `d_name` holds `d_namlen` name bytes followed by a NUL.
+			let name = unsafe {
+				std::slice::from_raw_parts(entry.d_name.as_ptr().cast::<u8>(), entry.d_namlen.into())
+			};
+			if name == b"." || name == b".." {
+				continue;
+			}
+			let file_type = match entry.d_type {
+				libc::DT_REG => FileType::File,
+				libc::DT_DIR => FileType::Dir,
+				libc::DT_LNK => FileType::Symlink,
+				libc::DT_UNKNOWN => match stat_file_type(&dir, entry) {
+					Ok(Some(file_type)) => file_type,
+					Ok(None) => continue,
+					Err(err) if is_skippable_entry_error(&err) => continue,
+					Err(err) => return Err(err.into()),
+				},
+				_ => continue,
+			};
+			let raw_entry = RawDirEntry {
+				name: OsStr::from_bytes(name).into(),
+				file_type,
+				mtime: None,
+				size: None,
+			};
+			if emit(raw_entry).map_err(ReadDirError::Walk)? == ReadDirControl::Stop {
+				return Ok(ReadDirControl::Stop);
+			}
+		}
+	}
+
+	/// Resolve the type of an entry whose listing reported `DT_UNKNOWN`.
+	fn stat_file_type(dir: &DirGuard, entry: &libc::dirent) -> io::Result<Option<FileType>> {
+		// SAFETY: `libc::stat` is plain old data filled by `fstatat`.
+		let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+		// SAFETY: `dir` is an open stream, `d_name` is NUL-terminated, and
+		// `stat` is writable.
+		let rc = unsafe {
+			libc::fstatat(
+				libc::dirfd(dir.0),
+				entry.d_name.as_ptr(),
+				&raw mut stat,
+				libc::AT_SYMLINK_NOFOLLOW,
+			)
+		};
+		if rc != 0 {
+			return Err(io::Error::last_os_error());
+		}
+		Ok(match stat.st_mode & libc::S_IFMT {
+			libc::S_IFREG => Some(FileType::File),
+			libc::S_IFDIR => Some(FileType::Dir),
+			libc::S_IFLNK => Some(FileType::Symlink),
+			_ => None,
+		})
+	}
+
+	/// List `path` with names, types, mtimes, and file sizes from
+	/// `getattrlistbulk`, returning volume-support errors instead of falling
+	/// back to `std::fs::read_dir`.
+	pub(super) fn read_bulk_entries<F, E>(
+		path: &Path,
 		buffer: &mut Vec<u8>,
 		mut emit: F,
 	) -> std::result::Result<ReadDirControl, ReadDirError<E>>
@@ -4033,16 +4176,17 @@ mod platform {
 		let mut attrs = libc::attrlist {
 			bitmapcount: libc::ATTR_BIT_MAP_COUNT,
 			reserved:    0,
-			commonattr:  libc::ATTR_CMN_NAME | libc::ATTR_CMN_OBJTYPE,
+			// getattrlistbulk fails with EINVAL unless ATTR_CMN_RETURNED_ATTRS
+			// is requested.
+			commonattr:  libc::ATTR_CMN_RETURNED_ATTRS
+				| libc::ATTR_CMN_NAME
+				| libc::ATTR_CMN_OBJTYPE
+				| libc::ATTR_CMN_MODTIME,
 			volattr:     0,
 			dirattr:     0,
-			fileattr:    0,
+			fileattr:    libc::ATTR_FILE_DATALENGTH,
 			forkattr:    0,
 		};
-		if detail == WalkDetail::Full {
-			attrs.commonattr |= libc::ATTR_CMN_MODTIME;
-			attrs.fileattr |= libc::ATTR_FILE_DATALENGTH;
-		}
 
 		if buffer.len() != BUFFER_SIZE {
 			buffer.resize(BUFFER_SIZE, 0);
@@ -4068,9 +4212,6 @@ mod platform {
 				if err.kind() == io::ErrorKind::Interrupted {
 					continue;
 				}
-				if is_unsupported_dir_scan(&err) {
-					return read_dir_entries_std(path, detail, emit);
-				}
 				return Err(ReadDirError::Io(err));
 			}
 
@@ -4088,7 +4229,7 @@ mod platform {
 					return Err(invalid_data("invalid getattrlistbulk record length").into());
 				}
 				let record = &buffer[offset..offset + record_len];
-				if let Some(entry) = parse_record(record, detail)?
+				if let Some(entry) = parse_record(record)?
 					&& emit(entry).map_err(ReadDirError::Walk)? == ReadDirControl::Stop
 				{
 					return Ok(ReadDirControl::Stop);
@@ -4172,17 +4313,29 @@ mod platform {
 		}
 	}
 
-	fn parse_record(record: &[u8], detail: WalkDetail) -> io::Result<Option<RawDirEntry<'_>>> {
+	/// Parse one record: its length, the returned `attribute_set_t`, then each
+	/// returned attribute in bitmap order. Attributes that do not apply to an
+	/// entry (such as `ATTR_FILE_DATALENGTH` for directories) are omitted, so
+	/// every read past the name is gated on its returned bit.
+	fn parse_record(record: &[u8]) -> io::Result<Option<RawDirEntry<'_>>> {
 		let mut cursor = size_of::<u32>();
+		let returned = read_value::<libc::attribute_set_t>(record, &mut cursor)?;
+		if returned.commonattr & REQUIRED_COMMON_ATTRS != REQUIRED_COMMON_ATTRS {
+			return Err(invalid_data("getattrlistbulk record without name or type"));
+		}
 		let name_ref_start = cursor;
 		let name_ref = read_value::<libc::attrreference_t>(record, &mut cursor)?;
 		let obj_type = read_value::<u32>(record, &mut cursor)?;
-		let (mtime, data_length) = if detail == WalkDetail::Full {
+		let mtime = if returned.commonattr & libc::ATTR_CMN_MODTIME != 0 {
 			let modified = read_value::<libc::timespec>(record, &mut cursor)?;
-			let data_length = read_value::<u64>(record, &mut cursor)?;
-			(mtime_millis(modified.tv_sec as i64, modified.tv_nsec as i64), Some(data_length))
+			mtime_millis(modified.tv_sec, modified.tv_nsec)
 		} else {
-			(None, None)
+			None
+		};
+		let data_length = if returned.fileattr & libc::ATTR_FILE_DATALENGTH != 0 {
+			Some(read_value::<u64>(record, &mut cursor)?)
+		} else {
+			None
 		};
 
 		let name_start = checked_attr_offset(name_ref_start, name_ref.attr_dataoffset)?;
@@ -5024,14 +5177,160 @@ mod tests {
 	}
 
 	#[test]
+	fn ranked_collection_counts_filtered_descendants_without_pruning() {
+		let tree = temp_tree("ranked-emission-filter");
+		fs::create_dir_all(tree.path().join("node_modules/pkg")).expect("create excluded subtree");
+		fs::create_dir(tree.path().join("nested")).expect("create matching subtree");
+		for (index, relative) in [
+			"a.txt",
+			"large.txt",
+			"nested/keep.txt",
+			"node_modules/pkg/hidden.txt",
+			"other.bin",
+			"z.txt",
+		]
+		.into_iter()
+		.enumerate()
+		{
+			let file = fs::File::create(tree.path().join(relative)).expect("create file");
+			file
+				.set_len(if relative == "large.txt" { 2 } else { 1 })
+				.expect("set size");
+			file
+				.set_modified(UNIX_EPOCH + Duration::from_secs(100 + index as u64))
+				.expect("set modification time");
+		}
+		let request = WalkRequest::from_options(tree.path(), WalkOptions {
+			skip_node_modules: false,
+			detail: WalkDetail::Full,
+			..test_options()
+		})
+		.filter(
+			WalkFilter::files_only()
+				.max_file_size(1)
+				.glob(CompiledWalkGlob::new(["**/*.txt"]).expect("compile glob"))
+				.node_modules_unless_mentioned(false),
+		);
+		for (rank, expected) in [
+			(WalkRank::PathAsc, ["a.txt", "nested/keep.txt", "z.txt"]),
+			(WalkRank::MtimeDescPathAsc, ["z.txt", "nested/keep.txt", "a.txt"]),
+		] {
+			for limit in [0, 1, 3, 4] {
+				let outcome = request
+					.collect_ranked(rank, limit)
+					.expect("collect ranked files");
+				assert_eq!(
+					outcome
+						.entries
+						.iter()
+						.map(|entry| entry.path.as_str())
+						.collect::<Vec<_>>(),
+					expected[..limit.min(expected.len())]
+				);
+				assert_eq!(outcome.stats, WalkStats {
+					cache_age_ms:     0,
+					scanned_entries:  9,
+					filtered_entries: 6,
+					limited_entries:  3usize.saturating_sub(limit),
+				});
+			}
+		}
+	}
+
+	#[test]
+	fn ranked_filter_preserves_kinds_unknown_sizes_and_node_modules_opt_in() {
+		let inputs = [
+			("boundary.txt", FileType::File, Some(2.0)),
+			("large.txt", FileType::File, Some(3.0)),
+			("unknown.txt", FileType::File, None),
+			("dir.txt", FileType::Dir, Some(99.0)),
+			("link.txt", FileType::Symlink, Some(99.0)),
+			("other.bin", FileType::File, Some(1.0)),
+			("node_modules", FileType::Dir, None),
+			("node_modules/hidden.txt", FileType::File, Some(1.0)),
+			("node_modules_like.txt", FileType::File, Some(1.0)),
+		];
+		for (filter, mentioned, expected) in [
+			(
+				WalkFilter::all(),
+				false,
+				&["boundary.txt", "dir.txt", "link.txt", "node_modules_like.txt", "unknown.txt"][..],
+			),
+			(
+				WalkFilter::files_only(),
+				false,
+				&["boundary.txt", "node_modules_like.txt", "unknown.txt"][..],
+			),
+			(WalkFilter::dirs_only(), false, &["dir.txt"][..]),
+			(
+				WalkFilter::all(),
+				true,
+				&[
+					"boundary.txt",
+					"dir.txt",
+					"link.txt",
+					"node_modules/hidden.txt",
+					"node_modules_like.txt",
+					"unknown.txt",
+				][..],
+			),
+		] {
+			let filter = filter
+				.max_file_size(2)
+				.glob(CompiledWalkGlob::new(["**/*.txt"]).expect("compile glob"))
+				.node_modules_unless_mentioned(mentioned);
+			for limit in [2, usize::MAX] {
+				let mut collector = RankedCollectVisitor::new(&filter, WalkRank::PathAsc, limit);
+				for (relative, file_type, size) in inputs {
+					collector
+						.visit(Entry {
+							path: Path::new(relative),
+							relative,
+							name: OsStr::new(relative),
+							file_type,
+							mtime: None,
+							size,
+							depth: relative.split('/').count(),
+						})
+						.expect("collect synthetic entry");
+				}
+				let outcome = collector.into_outcome();
+				assert_eq!(
+					outcome
+						.entries
+						.iter()
+						.map(|entry| entry.path.as_str())
+						.collect::<Vec<_>>(),
+					expected[..limit.min(expected.len())]
+				);
+				assert_eq!(outcome.stats.scanned_entries, inputs.len());
+				assert_eq!(outcome.stats.filtered_entries, inputs.len() - expected.len());
+				assert_eq!(outcome.stats.limited_entries, expected.len().saturating_sub(limit));
+			}
+		}
+	}
+
+	#[test]
 	fn ranked_collection_keeps_heartbeat_cancellation_after_limit_is_filled() {
 		let tree = temp_tree("ranked-cancel");
+		fs::write(tree.path().join("a.txt"), "x").expect("create first retained file");
+		fs::create_dir(tree.path().join("node_modules")).expect("create later subtree");
 		for index in 0..300 {
-			fs::write(tree.path().join(format!("{index}.txt")), "x").expect("create file");
+			fs::write(tree.path().join(format!("node_modules/{index}.txt")), "x")
+				.expect("create file");
 		}
-		for limit in [0, 1] {
-			let beats = std::sync::atomic::AtomicUsize::new(0);
-			let result = WalkRequest::from_options(tree.path(), test_options())
+		for filter in [
+			WalkFilter::all(),
+			WalkFilter::all().node_modules_unless_mentioned(false),
+			WalkFilter::all().glob(CompiledWalkGlob::new(["**/*.absent"]).expect("compile glob")),
+		] {
+			for limit in [0, 1] {
+				let beats = std::sync::atomic::AtomicUsize::new(0);
+				let result = WalkRequest::from_options(tree.path(), WalkOptions {
+					skip_node_modules: false,
+					..test_options()
+				})
+				.filter(filter.clone())
 				.collect_ranked_with_heartbeat(WalkRank::PathAsc, limit, || {
 					if beats.fetch_add(1, AtomicOrdering::Relaxed) == 0 {
 						Ok(())
@@ -5039,7 +5338,10 @@ mod tests {
 						Err("cancelled")
 					}
 				});
-			assert!(matches!(result, Err(WalkError::Interrupted(message)) if message == "cancelled"));
+				assert!(
+					matches!(result, Err(WalkError::Interrupted(message)) if message == "cancelled")
+				);
+			}
 		}
 	}
 
@@ -5066,33 +5368,54 @@ mod tests {
 			"negative-nan",
 			"missing",
 		];
-		for limit in [0, 1, 4, 8, 100] {
-			let mut collector = RankedCollectVisitor::new(&filter, WalkRank::MtimeDescPathAsc, limit);
-			for (relative, mtime) in inputs {
-				collector
-					.visit(Entry {
-						path: Path::new(relative),
-						relative,
-						name: OsStr::new(relative),
-						file_type: FileType::File,
-						mtime,
-						size: None,
-						depth: 1,
-					})
-					.expect("collect synthetic metadata");
-				assert!(collector.entries.len() <= limit);
+		let path_expected = [
+			"infinity",
+			"missing",
+			"negative-nan",
+			"negative-zero",
+			"positive-nan",
+			"positive-zero",
+			"tie-a",
+			"tie-z",
+		];
+		for (rank, expected) in
+			[(WalkRank::PathAsc, path_expected), (WalkRank::MtimeDescPathAsc, expected)]
+		{
+			for limit in 0..=inputs.len() + 1 {
+				let mut collector = RankedCollectVisitor::new(&filter, rank, limit);
+				for (relative, mtime) in inputs {
+					// Each visit borrows a temporary path; retained results must own
+					// it.
+					let relative = relative.to_string();
+					collector
+						.visit(Entry {
+							path: Path::new(&relative),
+							relative: &relative,
+							name: OsStr::new(&relative),
+							file_type: FileType::File,
+							mtime,
+							size: None,
+							depth: 1,
+						})
+						.expect("collect synthetic metadata");
+				}
+				let outcome = collector.into_outcome();
+				assert_eq!(
+					outcome
+						.entries
+						.iter()
+						.map(|entry| entry.path.as_str())
+						.collect::<Vec<_>>(),
+					expected[..limit.min(expected.len())]
+				);
+				for entry in &outcome.entries {
+					let (_, mtime) = inputs.iter().find(|(path, _)| *path == entry.path).unwrap();
+					assert_eq!(entry.mtime.map(f64::to_bits), mtime.map(f64::to_bits));
+				}
+				assert_eq!(outcome.stats.scanned_entries, inputs.len());
+				assert_eq!(outcome.stats.filtered_entries, 0);
+				assert_eq!(outcome.stats.limited_entries, inputs.len().saturating_sub(limit));
 			}
-			let outcome = collector.into_outcome();
-			assert_eq!(
-				outcome
-					.entries
-					.iter()
-					.map(|entry| entry.path.as_str())
-					.collect::<Vec<_>>(),
-				expected[..limit.min(expected.len())]
-			);
-			assert_eq!(outcome.stats.scanned_entries, inputs.len());
-			assert_eq!(outcome.stats.limited_entries, inputs.len().saturating_sub(limit));
 		}
 	}
 
@@ -5775,5 +6098,41 @@ mod tests {
 			!paths.iter().any(|path| path == "child.txt"),
 			"FollowLinks::Never should not traverse a symlink root, got: {paths:?}"
 		);
+	}
+
+	/// The `std::fs::read_dir` fallback hides a broken bulk request: listings
+	/// stay correct while every directory is opened twice. Call the bulk path
+	/// directly so a rejected request fails here.
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn getattrlistbulk_lists_types_sizes_and_mtimes() {
+		let tree = temp_tree("getattrlistbulk");
+		fs::write(tree.path().join("five"), "12345").expect("file should be written");
+		fs::create_dir(tree.path().join("sub")).expect("subdirectory should be created");
+		std::os::unix::fs::symlink("five", tree.path().join("link"))
+			.expect("symlink should be created");
+
+		let mut buffer = Vec::new();
+		let mut entries = Vec::new();
+		platform::read_bulk_entries::<_, Infallible>(tree.path(), &mut buffer, |entry| {
+			entries.push((
+				entry.name.to_string_lossy().into_owned(),
+				entry.file_type,
+				entry.size,
+				entry.mtime.is_some(),
+			));
+			Ok(ReadDirControl::Continue)
+		})
+		.unwrap_or_else(|err| match err {
+			ReadDirError::Io(err) => panic!("getattrlistbulk should list the directory: {err}"),
+			ReadDirError::Walk(_) => unreachable!("the visitor never fails"),
+		});
+		entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+		assert_eq!(entries, vec![
+			("five".to_string(), FileType::File, Some(5.0), true),
+			("link".to_string(), FileType::Symlink, None, true),
+			("sub".to_string(), FileType::Dir, None, true),
+		]);
 	}
 }
