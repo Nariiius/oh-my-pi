@@ -540,6 +540,7 @@ export interface InteractiveModeContext {
 	showDebugSelector(): Promise<void>;
 	showAgentHub(options?: AgentHubOpenOptions): void;
 	resetObserverRegistry(): void;
+	showOutboxSelector(): Promise<void> | void;
 
 	// Input handling
 	handleCtrlC(): void;
@@ -558,6 +559,10 @@ export interface InteractiveModeContext {
 	 */
 	handleQueueCommand(
 		message: string,
+		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+	): Promise<void>;
+	handleOutboxAddCommand(
+		message?: string,
 		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
 	): Promise<void>;
 	handleBtwCommand(question: string): Promise<void>;
