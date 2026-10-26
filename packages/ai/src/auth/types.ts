@@ -459,6 +459,7 @@ export interface ModelUsageAccountHealth {
 	state: ModelUsageHealthState;
 	remainingFraction?: number;
 	resetsAt?: number;
+	clearedAt?: number;
 }
 
 /** Aggregate model usage health and account detail. */
