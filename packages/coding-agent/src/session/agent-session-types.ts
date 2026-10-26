@@ -429,6 +429,8 @@ export interface PromptOptions {
 	throwOnDrop?: boolean;
 	/** Image attachments. */
 	images?: ImageContent[];
+	/** Optional image link URLs paired with image attachments. */
+	imageLinks?: (string | undefined)[];
 	/** Queue behavior while streaming. `"aside"` is non-interrupting — it does not steer/follow-up
 	 *  an in-flight tool batch, injecting at the next step boundary instead (see
 	 *  AgentSession.sendUserMessage's `deliverAs: "aside"`). */
@@ -456,6 +458,12 @@ export interface PromptOptions {
 	 * failed before admission still only settles through the returned promise.
 	 */
 	onPromptAdmitted?: () => void;
+	/**
+	 * Outbox job delivery: when set, ensures atomic persistence of
+	 * the accepted receipt along with the prepared user message before provider execution,
+	 * and guards against merging into concurrent manual prompts or session switches.
+	 */
+	outboxJobId?: string;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
