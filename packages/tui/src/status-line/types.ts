@@ -38,8 +38,17 @@ export interface CollabStatus {
 export interface StatusLineSegmentOptions {
 	pi?: { showProfile?: boolean };
 	model?: { showThinkingLevel?: boolean };
-	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
-	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
+	path?: {
+		abbreviate?: boolean;
+		maxLength?: number;
+		stripWorkPrefix?: boolean;
+	};
+	git?: {
+		showBranch?: boolean;
+		showStaged?: boolean;
+		showUnstaged?: boolean;
+		showUntracked?: boolean;
+	};
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
 }
 
@@ -257,6 +266,8 @@ export interface ComposerFacts {
 	readonly extras: NativeNode;
 	/** `text` (role `omp.composer.usage`): the session cost (empty when there is none). */
 	readonly usage: NativeNode;
+	/** Optional provider quotas, independent of session cost and its tooltip. */
+	readonly providerUsage?: NativeNode;
 }
 
 /** Supplies {@link ComposerFacts} and takes the clicks on them (`status.*` actions). */
