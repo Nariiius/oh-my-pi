@@ -43,3 +43,4 @@ export * from "@oh-my-pi/pi-tui/chat/ttsr-notification";
 export * from "@oh-my-pi/pi-tui/chat/user-message";
 export * from "@oh-my-pi/pi-tui/chrome/visual-truncate";
 export * from "@oh-my-pi/pi-tui/prompt/welcome";
+export * from "./outbox-selector";
