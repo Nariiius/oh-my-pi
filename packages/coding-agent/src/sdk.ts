@@ -35,7 +35,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { $env } from "@oh-my-pi/pi-utils/env";
+import { $env, isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
@@ -53,6 +53,7 @@ import {
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
+import { attachOutboxSession, prepareOutboxSession } from "./outbox/service";
 import { loadCapability, reset as resetCapabilities } from "./capability";
 import {
 	MAIN_AGENT_RULE_NAME,
@@ -916,6 +917,8 @@ export interface CreateAgentSessionOptions {
 	 * (see `title.generator`). Only the interactive TUI sets this; ignored for subagents. Default: false.
 	 */
 	autoTitle?: boolean;
+	/** Participate in the profile's durable outbox. Defaults to interactive root sessions outside tests. */
+	outbox?: boolean;
 	/**
 	 * Defer `confirm` reserve-policy fallback until AgentSession prompt-time UI is configured.
 	 * ACP uses this while capabilities are negotiated without enabling UI-only tools.
@@ -1931,6 +1934,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		logger.time("sessionManager", () =>
 			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
 		);
+	const enableOutbox =
+		!options.parentTaskPrefix &&
+		!options.taskDepth &&
+		(options.outbox ?? (options.hasUI === true && !isBunTestRuntime()));
+	if (enableOutbox) startupCleanup.defer(prepareOutboxSession(sessionManager));
 	const configuredDirs = options.additionalDirectories
 		? options.additionalDirectories
 		: cfgWorkspaceAdditionalDirectories.get(settings);
@@ -5598,6 +5606,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 		}
 		startDeferredMCPDiscovery?.(session);
+		if (enableOutbox) {
+			attachOutboxSession(session);
+		}
 
 		startupCleanup.move();
 		return {
