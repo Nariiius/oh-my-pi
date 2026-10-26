@@ -51,6 +51,8 @@ import { pickRecentFocusableAgentId } from "./session-focus-controller";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
 import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
+import { enqueueOutbox } from "../../outbox/service";
+import type { OutboxJob } from "../../outbox/types";
 import { isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import { resolveReadPath } from "../../tools/path-utils";
@@ -285,6 +287,7 @@ export class InputController {
 
 	#enhancedPaste?: EnhancedPasteController;
 	#draftText: string | undefined;
+	#savingOutboxDraft = false;
 	#focusedLeftTapListenerInstalled = false;
 	#focusedPasteListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
@@ -676,6 +679,8 @@ export class InputController {
 		this.ctx.editor.onCopyPrompt = () => this.handleCopyPrompt();
 		this.ctx.editor.setActionKeys("app.message.dequeue", this.ctx.keybindings.getKeys("app.message.dequeue"));
 		this.ctx.editor.onDequeue = () => this.handleDequeue();
+		this.ctx.editor.setActionKeys("app.message.outbox", this.ctx.keybindings.getKeys("app.message.outbox"));
+		this.ctx.editor.onQueueForReset = () => void this.handleQueueForReset();
 		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
 		this.ctx.editor.onRetry = () => void this.handleRetry();
 		this.ctx.editor.clearCustomKeyHandlers();
@@ -700,6 +705,9 @@ export class InputController {
 		}
 		for (const key of this.ctx.keybindings.getKeys("app.message.followUp")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.handleFollowUp());
+		}
+		for (const key of this.ctx.keybindings.getKeys("app.message.outbox")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => void this.handleQueueForReset());
 		}
 		for (const key of this.ctx.keybindings.getKeys("app.stt.toggle")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleSTTToggle());
@@ -1750,6 +1758,93 @@ export class InputController {
 		const images = source.images?.length ? [...source.images] : undefined;
 		const imageLinks = images && source.imageLinks?.length ? [...source.imageLinks] : undefined;
 		await this.#queueForYield(text, { images, imageLinks, detachedText: detached?.text });
+	}
+
+	/** Persist before clearing; edits made while saving remain in the composer. */
+	async handleQueueForReset(
+		explicitMessage?: string,
+		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+	): Promise<void> {
+		if (this.#savingOutboxDraft) return;
+		if (this.ctx.collabGuest) {
+			this.ctx.showStatus("/outbox is host-only during a collab session");
+			return;
+		}
+
+		let text: string;
+		let images: ImageContent[] | undefined;
+		let imageLinks: (string | undefined)[] | undefined;
+
+		const isExplicit = explicitMessage !== undefined && explicitMessage.trim().length > 0;
+		if (isExplicit) {
+			text = explicitMessage.trim();
+			images = detached?.images?.length
+				? [...detached.images]
+				: this.ctx.editor.pendingImages.length > 0
+					? [...this.ctx.editor.pendingImages]
+					: undefined;
+			imageLinks = detached?.imageLinks?.length
+				? [...detached.imageLinks]
+				: images && this.ctx.editor.pendingImageLinks.length > 0
+					? [...this.ctx.editor.pendingImageLinks]
+					: undefined;
+		} else if (detached) {
+			text = detached.text.trim();
+			images = detached.images?.length ? [...detached.images] : undefined;
+			imageLinks = detached.imageLinks?.length ? [...detached.imageLinks] : undefined;
+		} else {
+			// Live editor draft
+			const rawText = this.ctx.editor.getExpandedText();
+			text = this.#compactDraftImages(rawText.trim());
+			images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
+			imageLinks =
+				images && this.ctx.editor.pendingImageLinks.length > 0
+					? [...this.ctx.editor.pendingImageLinks]
+					: undefined;
+		}
+
+		if (!text && (!images || images.length === 0)) {
+			this.ctx.showWarning("Usage: /outbox add <message> (or type a draft to queue)");
+			return;
+		}
+
+		// Snapshot before async save so we can clear only the saved draft on commit and preserve new typing
+		const snapshotText = this.ctx.editor.getText();
+		const snapshotExpanded = this.ctx.editor.getExpandedText();
+
+		let job: OutboxJob;
+		this.#savingOutboxDraft = true;
+		try {
+			job = await enqueueOutbox(this.ctx.session, { text, images, imageLinks });
+		} catch (error) {
+			if (detached?.text !== undefined) {
+				restoreDetachedDraft(this.ctx.editor, detached.text, images, imageLinks);
+			}
+			// Live drafts have not been detached, so failed saves leave them untouched.
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			return;
+		} finally {
+			this.#savingOutboxDraft = false;
+		}
+
+		if (!detached) {
+			const editor = this.ctx.editor;
+			const sameImagePrefix = (images ?? []).every((image, index) => editor.pendingImages[index] === image);
+			if (
+				editor.getText() === snapshotText &&
+				sameImagePrefix &&
+				editor.pendingImages.length === (images?.length ?? 0)
+			) {
+				editor.clearDraft();
+			} else if (snapshotExpanded && editor.getExpandedText().startsWith(snapshotExpanded) && sameImagePrefix) {
+				const remaining = editor.getExpandedText().slice(snapshotExpanded.length).replace(/^\n+/, "");
+				this.#dropSubmittedPending(images, imageLinks);
+				editor.setText(shiftImageMarkers(remaining, -(images?.length ?? 0)));
+			}
+		}
+
+		this.ctx.showStatus(`Queued job #${job.position} in outbox (${job.id.slice(0, 8)})`);
+		this.ctx.ui.requestRender();
 	}
 
 	async #queueForYield(
