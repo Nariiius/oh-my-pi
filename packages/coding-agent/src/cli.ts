@@ -36,6 +36,7 @@ import {
 	IDA_HOST_WORKER_ARG,
 	LSP_MUX_WORKER_ARG,
 	MNEMOPI_EMBED_SERVER_WORKER_ARG,
+	OUTBOX_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
@@ -44,6 +45,7 @@ import {
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
+import type * as OutboxWorker from "./outbox/worker";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -319,6 +321,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === TEXT_PREDICT_WORKER_ARG) {
 		const { startTextPredictDaemonFromEnvironment } = await import("./predict/daemon");
 		await startTextPredictDaemonFromEnvironment();
+		return true;
+	}
+	if (arg === OUTBOX_WORKER_ARG) {
+		// This worker loads the SDK's ESM file assets; unrelated worker selectors must not load that graph.
+		const worker: typeof OutboxWorker = await import("./outbox/worker");
+		await worker.runOutboxWorker();
 		return true;
 	}
 	return false;
