@@ -12,21 +12,20 @@ import type {
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
 import { kCursorExecResolved, kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
@@ -40,7 +39,12 @@ const CODEX_BODY_READ_ERROR =
 const CYBER_POLICY_ERROR =
 	"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)";
 const CYBER_POLICY_FAILURE: MockResponse = {
-	content: [{ type: "thinking", thinking: "Checking whether this security request is allowed." }],
+	content: [
+		{
+			type: "thinking",
+			thinking: "Checking whether this security request is allowed.",
+		},
+	],
 	stopReason: "error",
 	errorMessage: CYBER_POLICY_ERROR,
 };
@@ -133,7 +137,9 @@ describe("AgentSession retry delay cap", () => {
 		const rateLimitError =
 			'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}} retry-after=11180.0005';
 
-		const mock = createMockModel({ handler: () => ({ throw: rateLimitError }) });
+		const mock = createMockModel({
+			handler: () => ({ throw: rateLimitError }),
+		});
 		const requestedModels: string[] = [];
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
@@ -194,6 +200,72 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("error");
 		expect(last.errorMessage).toContain("rate_limit_error");
 		expect(session.isRetrying).toBe(false);
+	});
+
+	it("keeps queued steering and follow-ups pending after a terminal usage limit until explicit retry", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const quotaError = "Codex error event: The usage limit has been reached (code=usage_limit_reached)";
+		const mock = createMockModel({
+			responses: [{ throw: quotaError }, { content: ["Resumed explicitly"] }, { content: ["Follow-up complete"] }],
+		});
+		let requests = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				requests++;
+				if (requests === 1) {
+					agent.steer({
+						role: "user",
+						content: "queued correction",
+						timestamp: 2,
+					});
+					agent.followUp({
+						role: "user",
+						content: "queued next task",
+						timestamp: 3,
+					});
+				}
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": false,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({
+			switched: false,
+		});
+		await session.prompt("Run until the provider rejects quota");
+		await session.waitForIdle();
+		expect(requests).toBe(1);
+		expect(agent.peekSteeringQueue().map(message => message.content)).toEqual(["queued correction"]);
+		expect(agent.peekFollowUpQueue().map(message => message.content)).toEqual(["queued next task"]);
+		expect(lastAssistant(session).stopReason).toBe("error");
+		await session.followUp("queued after stop");
+		await session.waitForIdle();
+		expect(requests).toBe(1);
+		expect(agent.peekFollowUpQueue()).toHaveLength(2);
+		await expect(session.retry()).resolves.toBe(true);
+		await session.waitForIdle();
+		expect(requests).toBe(4);
+		expect(agent.hasQueuedMessages()).toBe(false);
+		expect(
+			session.messages
+				.filter(message => message.role === "user")
+				.map(message =>
+					typeof message.content === "string"
+						? message.content
+						: message.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join(""),
+				),
+		).toEqual(["Run until the provider rejects quota", "queued correction", "queued next task", "queued after stop"]);
 	});
 
 	it("waits past retry.maxDelayMs for a usage-limit reset when retry.waitForUsageReset is set", async () => {
@@ -350,7 +422,9 @@ describe("AgentSession retry delay cap", () => {
 		const resetStamp = new Date(Date.now() + 7_200_000).toISOString().slice(0, 19).replace("T", " ");
 		const usageLimitError = `429 已达到 5 小时的使用上限。您的限额将在 ${resetStamp} 重置。`;
 
-		const mock = createMockModel({ handler: () => ({ throw: usageLimitError }) });
+		const mock = createMockModel({
+			handler: () => ({ throw: usageLimitError }),
+		});
 		const requestedModels: string[] = [];
 		const agent = new Agent({
 			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
@@ -418,7 +492,9 @@ describe("AgentSession retry delay cap", () => {
 
 		const overloadedError = "503 service unavailable: overloaded_error retry-after-ms=3600000";
 
-		const mock = createMockModel({ handler: () => ({ throw: overloadedError }) });
+		const mock = createMockModel({
+			handler: () => ({ throw: overloadedError }),
+		});
 		const requestedModels: string[] = [];
 		const agent = new Agent({
 			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
@@ -722,7 +798,10 @@ describe("AgentSession retry delay cap", () => {
 				)) as unknown as typeof fetch,
 		});
 		await localStorage.credentials.reload();
-		await localStorage.credentials.set("opencode-go", { type: "api_key", key: "opencode-go-usage-key" });
+		await localStorage.credentials.set("opencode-go", {
+			type: "api_key",
+			key: "opencode-go-usage-key",
+		});
 		return localStorage;
 	}
 
@@ -738,15 +817,25 @@ describe("AgentSession retry delay cap", () => {
 		}
 
 		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 7_200_000).toISOString() },
+			{
+				status: "ok",
+				percent: 12,
+				resetsAtIso: new Date(Date.now() + 300_000).toISOString(),
+			},
+			{
+				status: "rate-limited",
+				percent: 100,
+				resetsAtIso: new Date(Date.now() + 7_200_000).toISOString(),
+			},
 		);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
 
 			const mock = createMockModel({
 				responses: [
-					{ throw: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=60000" },
+					{
+						throw: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=60000",
+					},
 					{ content: ["recovered after weekly reset"], stopReason: "stop" },
 				],
 			});
@@ -822,8 +911,16 @@ describe("AgentSession retry delay cap", () => {
 		}
 
 		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 7_200_000).toISOString() },
+			{
+				status: "ok",
+				percent: 12,
+				resetsAtIso: new Date(Date.now() + 300_000).toISOString(),
+			},
+			{
+				status: "rate-limited",
+				percent: 100,
+				resetsAtIso: new Date(Date.now() + 7_200_000).toISOString(),
+			},
 		);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
@@ -904,8 +1001,16 @@ describe("AgentSession retry delay cap", () => {
 		}
 
 		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
+			{
+				status: "ok",
+				percent: 12,
+				resetsAtIso: new Date(Date.now() + 300_000).toISOString(),
+			},
+			{
+				status: "rate-limited",
+				percent: 100,
+				resetsAtIso: new Date(Date.now() + 300_000).toISOString(),
+			},
 		);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
@@ -913,7 +1018,10 @@ describe("AgentSession retry delay cap", () => {
 			const mock = createMockModel({
 				responses: [
 					{ throw: "429 quota exceeded for this account" },
-					{ content: ["recovered after short reported reset"], stopReason: "stop" },
+					{
+						content: ["recovered after short reported reset"],
+						stopReason: "stop",
+					},
 				],
 			});
 			const requestedModels: string[] = [];
@@ -994,8 +1102,16 @@ describe("AgentSession retry delay cap", () => {
 		const resetAtMs = startMs + 7_200_000;
 
 		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(startMs + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(resetAtMs).toISOString() },
+			{
+				status: "ok",
+				percent: 12,
+				resetsAtIso: new Date(startMs + 300_000).toISOString(),
+			},
+			{
+				status: "rate-limited",
+				percent: 100,
+				resetsAtIso: new Date(resetAtMs).toISOString(),
+			},
 		);
 		try {
 			localStorage.keys.setRuntime("anthropic", "anthropic-test-key");
@@ -1005,7 +1121,12 @@ describe("AgentSession retry delay cap", () => {
 			const requestedModels: string[] = [];
 			const agent = new Agent({
 				getApiKey: model => localRegistry.resolver(model, agent.sessionId),
-				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				initialState: {
+					model: primaryModel,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
 				streamFn: (requestedModel, context, options) => {
 					const selector = `${requestedModel.provider}/${requestedModel.id}`;
 					requestedModels.push(selector);
@@ -1107,7 +1228,12 @@ describe("AgentSession retry delay cap", () => {
 			const primaryKeys: string[] = [];
 			const agent = new Agent({
 				getApiKey: model => localRegistry.resolver(model, agent.sessionId),
-				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				initialState: {
+					model: primaryModel,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
 				streamFn: async (requestedModel, context, options) => {
 					const selector = `${requestedModel.provider}/${requestedModel.id}`;
 					requestedModels.push(selector);
@@ -1166,7 +1292,10 @@ describe("AgentSession retry delay cap", () => {
 			await session.waitForIdle();
 			expect(requestedModels).toEqual([primarySelector, primarySelector, fallbackSelector, primarySelector]);
 			expect(primaryKeys.at(-1)).not.toBe(primaryKeys[0]);
-			expect(lastAssistant(session).content).toContainEqual({ type: "text", text: `ok:${primarySelector}` });
+			expect(lastAssistant(session).content).toContainEqual({
+				type: "text",
+				text: `ok:${primarySelector}`,
+			});
 		} finally {
 			localStorage.close();
 		}
@@ -1186,8 +1315,16 @@ describe("AgentSession retry delay cap", () => {
 		}
 
 		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
+			{
+				status: "ok",
+				percent: 12,
+				resetsAtIso: new Date(Date.now() + 300_000).toISOString(),
+			},
+			{
+				status: "rate-limited",
+				percent: 100,
+				resetsAtIso: new Date(Date.now() + 300_000).toISOString(),
+			},
 		);
 		try {
 			// An earlier usage-limit response on a sibling session (same
@@ -1283,8 +1420,16 @@ describe("AgentSession retry delay cap", () => {
 		}
 
 		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
+			{
+				status: "ok",
+				percent: 12,
+				resetsAtIso: new Date(Date.now() + 300_000).toISOString(),
+			},
+			{
+				status: "rate-limited",
+				percent: 100,
+				resetsAtIso: new Date(Date.now() + 300_000).toISOString(),
+			},
 		);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
@@ -1377,8 +1522,16 @@ describe("AgentSession retry delay cap", () => {
 		}
 
 		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "ok", percent: 12, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 300_000).toISOString() },
+			{
+				status: "ok",
+				percent: 12,
+				resetsAtIso: new Date(Date.now() + 300_000).toISOString(),
+			},
+			{
+				status: "rate-limited",
+				percent: 100,
+				resetsAtIso: new Date(Date.now() + 300_000).toISOString(),
+			},
 		);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
@@ -1392,7 +1545,10 @@ describe("AgentSession retry delay cap", () => {
 			const mock = createMockModel({
 				responses: [
 					{ throw: "429 quota exceeded for this account" },
-					{ content: ["recovered after short reported reset"], stopReason: "stop" },
+					{
+						content: ["recovered after short reported reset"],
+						stopReason: "stop",
+					},
 				],
 			});
 			const requestedModels: string[] = [];
@@ -1498,7 +1654,10 @@ describe("AgentSession retry delay cap", () => {
 		try {
 			await priorStorage.credentials.reload();
 			await restartedStorage.credentials.reload();
-			await priorStorage.credentials.set("opencode-go", { type: "api_key", key: "opencode-go-usage-key" });
+			await priorStorage.credentials.set("opencode-go", {
+				type: "api_key",
+				key: "opencode-go-usage-key",
+			});
 			await restartedStorage.credentials.reload();
 			// Pre-restart hintless sibling response with no report reset: the
 			// stored block is the 30-minute heuristic guess (no providerTimed).
@@ -1512,7 +1671,10 @@ describe("AgentSession retry delay cap", () => {
 			const mock = createMockModel({
 				responses: [
 					{ throw: "429 quota exceeded for this account" },
-					{ content: ["recovered after short reported reset"], stopReason: "stop" },
+					{
+						content: ["recovered after short reported reset"],
+						stopReason: "stop",
+					},
 				],
 			});
 			const requestedModels: string[] = [];
@@ -1590,13 +1752,23 @@ describe("AgentSession retry delay cap", () => {
 		}
 
 		const localStorage = await createOpencodeStorageWithUsage(
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() + 7_200_000).toISOString() },
-			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(Date.now() - 3_600_000).toISOString() },
+			{
+				status: "rate-limited",
+				percent: 100,
+				resetsAtIso: new Date(Date.now() + 7_200_000).toISOString(),
+			},
+			{
+				status: "rate-limited",
+				percent: 100,
+				resetsAtIso: new Date(Date.now() - 3_600_000).toISOString(),
+			},
 		);
 		try {
 			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
 
-			const mock = createMockModel({ handler: () => ({ throw: "429 quota exceeded for this account" }) });
+			const mock = createMockModel({
+				handler: () => ({ throw: "429 quota exceeded for this account" }),
+			});
 			const requestedModels: string[] = [];
 			const agent = new Agent({
 				getApiKey: model => localRegistry.resolver(model, agent.sessionId),
@@ -1670,23 +1842,36 @@ describe("AgentSession retry delay cap", () => {
 
 		const mock = createMockModel({
 			responses: [
-				{ throw: "503 service unavailable: overloaded_error retry-after-ms=60000" },
+				{
+					throw: "503 service unavailable: overloaded_error retry-after-ms=60000",
+				},
 				{
 					content: [{ type: "thinking", thinking: "Classifier refusal." }],
 					errorMessage: "Refusal (cyber): Declined.",
-					stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
+					stopDetails: {
+						type: "refusal",
+						category: "cyber",
+						explanation: "Declined.",
+					},
 					stopReason: "error",
 				},
 				{
 					content: [{ type: "thinking", thinking: "Classifier refusal." }],
 					errorMessage: "Refusal (cyber): Declined.",
-					stopDetails: { type: "refusal", category: "cyber", explanation: "Declined." },
+					stopDetails: {
+						type: "refusal",
+						category: "cyber",
+						explanation: "Declined.",
+					},
 					stopReason: "error",
 				},
 				{
 					throw: "429 Weekly usage limit reached. Resets in 55min. type=GoUsageLimitError retry-after-ms=3242000",
 				},
-				{ content: ["recovered on cross-provider fallback"], stopReason: "stop" },
+				{
+					content: ["recovered on cross-provider fallback"],
+					stopReason: "stop",
+				},
 			],
 		});
 		const requestedModels: string[] = [];
@@ -1791,7 +1976,10 @@ describe("AgentSession retry delay cap", () => {
 						? {
 								throw: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
 							}
-						: { content: ["recovered after sibling unblock"], stopReason: "stop" },
+						: {
+								content: ["recovered after sibling unblock"],
+								stopReason: "stop",
+							},
 				);
 				return mock.stream(requestedModel, context, options);
 			},
@@ -1801,7 +1989,9 @@ describe("AgentSession retry delay cap", () => {
 			"retry.maxDelayMs": 300_000,
 			"retry.maxRetries": 2,
 			"retry.modelFallback": true,
-			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
 		});
 		settings.setModelRole("default", `${exhaustedModel.provider}/${exhaustedModel.id}`);
 
@@ -1822,7 +2012,10 @@ describe("AgentSession retry delay cap", () => {
 		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
 		const usageLimitResult = usageLimitSpy.mock.results[0]?.value;
 		expect(usageLimitResult).toBeDefined();
-		expect(await usageLimitResult).toMatchObject({ retryAtMs: expect.any(Number), switched: false });
+		expect(await usageLimitResult).toMatchObject({
+			retryAtMs: expect.any(Number),
+			switched: false,
+		});
 
 		expect(requestedModels).toEqual([
 			`${exhaustedModel.provider}/${exhaustedModel.id}`,
@@ -1947,7 +2140,10 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered after stream read retry" });
+		expect(last.content).toContainEqual({
+			type: "text",
+			text: "recovered after stream read retry",
+		});
 	});
 
 	it("auto-retries Unable to connect transport failures instead of stopping the conversation", async () => {
@@ -2007,7 +2203,10 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered after connection retry" });
+		expect(last.content).toContainEqual({
+			type: "text",
+			text: "recovered after connection retry",
+		});
 	});
 
 	it("marks extension agent_end willContinue when auto-retry schedules a continue", async () => {
@@ -2048,7 +2247,10 @@ describe("AgentSession retry delay cap", () => {
 		// only emit surfaces used on the auto-retry path are implemented.
 		const extensionRunner = {
 			emit: async (event: { type: string; willContinue?: boolean }) => {
-				extensionEmits.push({ type: event.type, willContinue: event.willContinue });
+				extensionEmits.push({
+					type: event.type,
+					willContinue: event.willContinue,
+				});
 			},
 			emitBeforeAgentStart: async () => undefined,
 			hasHandlers: () => false,
@@ -2179,7 +2381,10 @@ describe("AgentSession retry delay cap", () => {
 		).toBe(false);
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered on fourth credential" });
+		expect(last.content).toContainEqual({
+			type: "text",
+			text: "recovered on fourth credential",
+		});
 	});
 
 	it("switches same-provider credentials before model fallback on ChatGPT usage limits", async () => {
@@ -2251,7 +2456,10 @@ describe("AgentSession retry delay cap", () => {
 		expect([...requestedKeys].sort()).toEqual(["anthropic-key-1", "anthropic-key-2"]);
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered after sibling account" });
+		expect(last.content).toContainEqual({
+			type: "text",
+			text: "recovered after sibling account",
+		});
 	});
 
 	it("tries every Codex account before the configured model fallback on cyber-policy denials", async () => {
@@ -2280,7 +2488,10 @@ describe("AgentSession retry delay cap", () => {
 				if (!apiKey) throw new Error("Expected streamSimple to pass a resolved string API key");
 				requestedKeys.push(apiKey);
 				return new Set(requestedKeys).size >= 4
-					? { content: ["recovered on cyber-approved account"], stopReason: "stop" }
+					? {
+							content: ["recovered on cyber-approved account"],
+							stopReason: "stop",
+						}
 					: CYBER_POLICY_FAILURE;
 			},
 		});
@@ -2359,7 +2570,9 @@ describe("AgentSession retry delay cap", () => {
 			{ type: "api_key", key: "advisor-codex-key-C" },
 		]);
 
-		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
+		const mainMock = createMockModel({
+			responses: [{ content: ["Primary complete"] }],
+		});
 		const requestedAdvisorKeys: string[] = [];
 		const advisorRecovered = Promise.withResolvers<void>();
 		const advisorMock = createMockModel({
@@ -2371,7 +2584,10 @@ describe("AgentSession retry delay cap", () => {
 				requestedAdvisorKeys.push(apiKey);
 				if (new Set(requestedAdvisorKeys).size < 3) return CYBER_POLICY_FAILURE;
 				advisorRecovered.resolve();
-				return { content: ["Advisor recovered on cyber-approved account"], stopReason: "stop" };
+				return {
+					content: ["Advisor recovered on cyber-approved account"],
+					stopReason: "stop",
+				};
 			},
 		});
 		const requestedAdvisorModels: string[] = [];
@@ -2518,7 +2734,10 @@ describe("AgentSession retry delay cap", () => {
 		}
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered after sibling unblock" });
+		expect(last.content).toContainEqual({
+			type: "text",
+			text: "recovered after sibling unblock",
+		});
 	});
 
 	it("still retries normally when the delay is under retry.maxDelayMs", async () => {
@@ -2531,7 +2750,9 @@ describe("AgentSession retry delay cap", () => {
 
 		const mock = createMockModel({
 			responses: [
-				{ throw: "503 service unavailable: overloaded_error retry-after-ms=50" },
+				{
+					throw: "503 service unavailable: overloaded_error retry-after-ms=50",
+				},
 				{ content: ["recovered after short backoff"] },
 			],
 		});
@@ -2604,7 +2825,10 @@ describe("AgentSession retry delay cap", () => {
 			type: "toolCall",
 			id: "tc-fresh",
 			name: "write",
-			arguments: { path: "doc/report.md", content: "complete recovered report" },
+			arguments: {
+				path: "doc/report.md",
+				content: "complete recovered report",
+			},
 		};
 		const executedIds: string[] = [];
 		const countingTool: AgentTool = {
@@ -2655,7 +2879,9 @@ describe("AgentSession retry delay cap", () => {
 						id: requestedModel.id,
 						provider: requestedModel.provider,
 					});
-					recoveryModel.push({ content: streamCalls === 2 ? [freshCall] : ["Recovered after transport error"] });
+					recoveryModel.push({
+						content: streamCalls === 2 ? [freshCall] : ["Recovered after transport error"],
+					});
 					return recoveryModel.stream(recoveryModel, context, options);
 				}
 
@@ -2673,7 +2899,13 @@ describe("AgentSession retry delay cap", () => {
 							cacheRead: 0,
 							cacheWrite: 0,
 							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							cost: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								total: 0,
+							},
 						},
 						stopReason: "stop",
 						timestamp: Date.now(),
@@ -2689,7 +2921,12 @@ describe("AgentSession retry delay cap", () => {
 							partial,
 						});
 						if (callStates[contentIndex] !== "partial") {
-							stream.push({ type: "toolcall_end", contentIndex, toolCall, partial });
+							stream.push({
+								type: "toolcall_end",
+								contentIndex,
+								toolCall,
+								partial,
+							});
 						}
 					}
 					stream.push({
@@ -2816,7 +3053,13 @@ describe("AgentSession retry delay cap", () => {
 								cacheRead: 0,
 								cacheWrite: 0,
 								totalTokens: 0,
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+								cost: {
+									input: 0,
+									output: 0,
+									cacheRead: 0,
+									cacheWrite: 0,
+									total: 0,
+								},
 							},
 							stopReason: "stop",
 							timestamp: Date.now(),
@@ -2829,7 +3072,12 @@ describe("AgentSession retry delay cap", () => {
 							delta: JSON.stringify(toolCall.arguments),
 							partial,
 						});
-						stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+						stream.push({
+							type: "toolcall_end",
+							contentIndex: 0,
+							toolCall,
+							partial,
+						});
 						stream.push({
 							type: "error",
 							reason: stopReason,
@@ -2941,7 +3189,13 @@ describe("AgentSession retry delay cap", () => {
 							cacheRead: 0,
 							cacheWrite: 0,
 							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							cost: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								total: 0,
+							},
 						},
 						stopReason: "stop",
 						timestamp: Date.now(),
@@ -2954,7 +3208,12 @@ describe("AgentSession retry delay cap", () => {
 						delta: JSON.stringify(toolCall.arguments),
 						partial,
 					});
-					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					stream.push({
+						type: "toolcall_end",
+						contentIndex: 0,
+						toolCall,
+						partial,
+					});
 					stream.push({
 						type: "error",
 						reason: "error",
@@ -3000,7 +3259,10 @@ describe("AgentSession retry delay cap", () => {
 		).toHaveLength(1);
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
-		expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "Recovered after Cursor stall" });
+		expect(lastAssistant(session).content).toContainEqual({
+			type: "text",
+			text: "Recovered after Cursor stall",
+		});
 	});
 
 	it("resumes a Cursor HTTP/2 stream reset after an unmarked MCP tool result", async () => {
@@ -3060,7 +3322,13 @@ describe("AgentSession retry delay cap", () => {
 							cacheRead: 0,
 							cacheWrite: 0,
 							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							cost: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								total: 0,
+							},
 						},
 						stopReason: "stop",
 						timestamp: Date.now(),
@@ -3073,7 +3341,12 @@ describe("AgentSession retry delay cap", () => {
 						delta: JSON.stringify(toolCall.arguments),
 						partial,
 					});
-					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					stream.push({
+						type: "toolcall_end",
+						contentIndex: 0,
+						toolCall,
+						partial,
+					});
 					stream.push({
 						type: "error",
 						reason: "error",
@@ -3182,7 +3455,13 @@ describe("AgentSession retry delay cap", () => {
 							cacheRead: 0,
 							cacheWrite: 0,
 							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							cost: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								total: 0,
+							},
 						},
 						stopReason: "stop",
 						timestamp: Date.now(),
@@ -3195,7 +3474,12 @@ describe("AgentSession retry delay cap", () => {
 						delta: JSON.stringify(toolCall.arguments),
 						partial,
 					});
-					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					stream.push({
+						type: "toolcall_end",
+						contentIndex: 0,
+						toolCall,
+						partial,
+					});
 					stream.push({
 						type: "error",
 						reason: "error",
@@ -3284,22 +3568,49 @@ describe("AgentSession retry delay cap", () => {
 							cacheRead: 0,
 							cacheWrite: 0,
 							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							cost: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								total: 0,
+							},
 						},
 						stopReason: "stop",
 						timestamp: Date.now(),
 					};
 
 					if (streamCalls === 1) {
-						const thinking = { type: "thinking" as const, thinking: "partial thought" };
-						const text = { type: "text" as const, text: "partial buffered answer" };
+						const thinking = {
+							type: "thinking" as const,
+							thinking: "partial thought",
+						};
+						const text = {
+							type: "text" as const,
+							text: "partial buffered answer",
+						};
 						partial.content.push(thinking, text);
 						stream.push({ type: "start", partial });
 						stream.push({ type: "thinking_start", contentIndex: 0, partial });
-						stream.push({ type: "thinking_delta", contentIndex: 0, delta: thinking.thinking, partial });
-						stream.push({ type: "thinking_end", contentIndex: 0, content: thinking.thinking, partial });
+						stream.push({
+							type: "thinking_delta",
+							contentIndex: 0,
+							delta: thinking.thinking,
+							partial,
+						});
+						stream.push({
+							type: "thinking_end",
+							contentIndex: 0,
+							content: thinking.thinking,
+							partial,
+						});
 						stream.push({ type: "text_start", contentIndex: 1, partial });
-						stream.push({ type: "text_delta", contentIndex: 1, delta: text.text, partial });
+						stream.push({
+							type: "text_delta",
+							contentIndex: 1,
+							delta: text.text,
+							partial,
+						});
 						stream.push({
 							type: "error",
 							reason: "error",
@@ -3313,12 +3624,25 @@ describe("AgentSession retry delay cap", () => {
 						return;
 					}
 
-					const recovered = { type: "text" as const, text: "recovered after partial socket close" };
+					const recovered = {
+						type: "text" as const,
+						text: "recovered after partial socket close",
+					};
 					partial.content.push(recovered);
 					stream.push({ type: "start", partial });
 					stream.push({ type: "text_start", contentIndex: 0, partial });
-					stream.push({ type: "text_delta", contentIndex: 0, delta: recovered.text, partial });
-					stream.push({ type: "text_end", contentIndex: 0, content: recovered.text, partial });
+					stream.push({
+						type: "text_delta",
+						contentIndex: 0,
+						delta: recovered.text,
+						partial,
+					});
+					stream.push({
+						type: "text_end",
+						contentIndex: 0,
+						content: recovered.text,
+						partial,
+					});
 					stream.push({
 						type: "done",
 						reason: "stop",
@@ -3365,7 +3689,10 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered after partial socket close" });
+		expect(last.content).toContainEqual({
+			type: "text",
+			text: "recovered after partial socket close",
+		});
 	});
 
 	it.each([
@@ -3411,32 +3738,64 @@ describe("AgentSession retry delay cap", () => {
 								cacheRead: 0,
 								cacheWrite: 0,
 								totalTokens: 0,
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+								cost: {
+									input: 0,
+									output: 0,
+									cacheRead: 0,
+									cacheWrite: 0,
+									total: 0,
+								},
 							},
 							stopReason: "stop",
 							timestamp: Date.now(),
 						};
 
 						if (streamCalls === 1) {
-							const text = { type: "text" as const, text: "I'll systematically investigate the codebase" };
+							const text = {
+								type: "text" as const,
+								text: "I'll systematically investigate the codebase",
+							};
 							partial.content.push(text);
 							stream.push({ type: "start", partial });
 							stream.push({ type: "text_start", contentIndex: 0, partial });
-							stream.push({ type: "text_delta", contentIndex: 0, delta: text.text, partial });
+							stream.push({
+								type: "text_delta",
+								contentIndex: 0,
+								delta: text.text,
+								partial,
+							});
 							stream.push({
 								type: "error",
 								reason: "error",
-								error: { ...partial, stopReason: "error", errorMessage: envelopeError, duration: 1000 },
+								error: {
+									...partial,
+									stopReason: "error",
+									errorMessage: envelopeError,
+									duration: 1000,
+								},
 							});
 							return;
 						}
 
-						const recovered = { type: "text" as const, text: "recovered after envelope retry" };
+						const recovered = {
+							type: "text" as const,
+							text: "recovered after envelope retry",
+						};
 						partial.content.push(recovered);
 						stream.push({ type: "start", partial });
 						stream.push({ type: "text_start", contentIndex: 0, partial });
-						stream.push({ type: "text_delta", contentIndex: 0, delta: recovered.text, partial });
-						stream.push({ type: "text_end", contentIndex: 0, content: recovered.text, partial });
+						stream.push({
+							type: "text_delta",
+							contentIndex: 0,
+							delta: recovered.text,
+							partial,
+						});
+						stream.push({
+							type: "text_end",
+							contentIndex: 0,
+							content: recovered.text,
+							partial,
+						});
 						stream.push({
 							type: "done",
 							reason: "stop",
@@ -3478,7 +3837,10 @@ describe("AgentSession retry delay cap", () => {
 			const last = lastAssistant(session);
 			if (agentKind === "sub") {
 				expect(last.stopReason).toBe("stop");
-				expect(last.content).toContainEqual({ type: "text", text: "recovered after envelope retry" });
+				expect(last.content).toContainEqual({
+					type: "text",
+					text: "recovered after envelope retry",
+				});
 			} else {
 				expect(last.stopReason).toBe("error");
 				expect(last.errorMessage).toBe(envelopeError);
@@ -3616,7 +3978,10 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered after generic gateway upstream error" });
+		expect(last.content).toContainEqual({
+			type: "text",
+			text: "recovered after generic gateway upstream error",
+		});
 	});
 
 	it("retries empty reasonless aborted turns", async () => {
@@ -3677,7 +4042,10 @@ describe("AgentSession retry delay cap", () => {
 		expect(fallbackEvents).toHaveLength(0);
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered after empty reasonless abort" });
+		expect(last.content).toContainEqual({
+			type: "text",
+			text: "recovered after empty reasonless abort",
+		});
 	});
 
 	it("does not retry reasonless aborted turns that have partial content", async () => {
@@ -3687,7 +4055,13 @@ describe("AgentSession retry delay cap", () => {
 		}
 
 		const mock = createMockModel({
-			responses: [{ content: ["partial"], stopReason: "aborted", errorMessage: "Request was aborted" }],
+			responses: [
+				{
+					content: ["partial"],
+					stopReason: "aborted",
+					errorMessage: "Request was aborted",
+				},
+			],
 		});
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
@@ -3739,7 +4113,13 @@ describe("AgentSession retry delay cap", () => {
 		const usageLimitError =
 			'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}}';
 		const mock = createMockModel({
-			responses: [{ content: ["Already visible"], stopReason: "error", errorMessage: usageLimitError }],
+			responses: [
+				{
+					content: ["Already visible"],
+					stopReason: "error",
+					errorMessage: usageLimitError,
+				},
+			],
 		});
 		const agent = new Agent({
 			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
@@ -3778,7 +4158,10 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryStartEvents).toHaveLength(0);
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("error");
-		expect(last.content).toContainEqual({ type: "text", text: "Already visible" });
+		expect(last.content).toContainEqual({
+			type: "text",
+			text: "Already visible",
+		});
 	});
 
 	it("does not auto-retry empty reasonless aborts once the session is disposing", async () => {
@@ -3867,10 +4250,19 @@ describe("AgentSession retry delay cap", () => {
 						cacheRead: 0,
 						cacheWrite: 0,
 						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						cost: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							total: 0,
+						},
 					};
 					if (calls > 2) {
-						const text: TextContent = { type: "text", text: "must remain unused" };
+						const text: TextContent = {
+							type: "text",
+							text: "must remain unused",
+						};
 						const message: AssistantMessage = {
 							role: "assistant",
 							content: [text],
@@ -3882,9 +4274,23 @@ describe("AgentSession retry delay cap", () => {
 							timestamp: Date.now(),
 						};
 						stream.push({ type: "start", partial: message });
-						stream.push({ type: "text_start", contentIndex: 0, partial: message });
-						stream.push({ type: "text_delta", contentIndex: 0, delta: text.text, partial: message });
-						stream.push({ type: "text_end", contentIndex: 0, content: text.text, partial: message });
+						stream.push({
+							type: "text_start",
+							contentIndex: 0,
+							partial: message,
+						});
+						stream.push({
+							type: "text_delta",
+							contentIndex: 0,
+							delta: text.text,
+							partial: message,
+						});
+						stream.push({
+							type: "text_end",
+							contentIndex: 0,
+							content: text.text,
+							partial: message,
+						});
 						stream.push({ type: "done", reason: "stop", message });
 						return;
 					}
@@ -3903,10 +4309,24 @@ describe("AgentSession retry delay cap", () => {
 					};
 					const delta = `reasoning attempt ${calls}`;
 					stream.push({ type: "start", partial: message });
-					stream.push({ type: "thinking_start", contentIndex: 0, partial: message });
+					stream.push({
+						type: "thinking_start",
+						contentIndex: 0,
+						partial: message,
+					});
 					thinking.thinking = delta;
-					stream.push({ type: "thinking_delta", contentIndex: 0, delta, partial: message });
-					stream.push({ type: "thinking_end", contentIndex: 0, content: thinking.thinking, partial: message });
+					stream.push({
+						type: "thinking_delta",
+						contentIndex: 0,
+						delta,
+						partial: message,
+					});
+					stream.push({
+						type: "thinking_end",
+						contentIndex: 0,
+						content: thinking.thinking,
+						partial: message,
+					});
 					stream.push({ type: "error", reason: "error", error: message });
 				});
 				return stream;
@@ -4031,6 +4451,9 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 10 });
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered after default 502 retry budget" });
+		expect(last.content).toContainEqual({
+			type: "text",
+			text: "recovered after default 502 retry budget",
+		});
 	});
 });
