@@ -176,6 +176,12 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.modelsHelp,
 	},
 	{
+		name: "outbox",
+		// Runtime command registry: preserve the SDK's ESM asset imports without loading it for help.
+		load: () => import("./commands/outbox").then(m => m.default),
+		help: commandHelp.outboxHelp,
+	},
+	{
 		name: "plugin",
 		load: () => import("./commands/plugin").then(m => m.default),
 		aliases: ["plugins"],
