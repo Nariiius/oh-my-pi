@@ -324,6 +324,10 @@ import {
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
 import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
+import { OutboxSelectorComponent, type OutboxViewState } from "./components/outbox-selector";
+import { enqueueOutboxDestination, outboxDestinationLabel, outboxDestinations, type OutboxDestination } from "../outbox/destinations";
+import { armOutboxResume, getOutboxStore } from "../outbox/service";
+import type { OutboxJob } from "../outbox/types";
 import { clearMermaidCache } from "@oh-my-pi/pi-tui/theme/mermaid-cache";
 import { type ShimmerPalette, shimmerEnabled, shimmerText } from "@oh-my-pi/pi-tui/theme/shimmer";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -8502,6 +8506,111 @@ export class InteractiveMode implements InteractiveModeContext {
 	showTreeSelector(): void {
 		this.#selectorController.showTreeSelector();
 	}
+	async showOutboxSelector(): Promise<void> {
+		const store = getOutboxStore();
+		const state: OutboxViewState = { scope: "current" };
+		type Action = { type: "edit"; job: OutboxJob }
+			| { type: "add" | "resume"; sessionId?: string; destinations: OutboxDestination[] }
+			| { type: "close" };
+		while (true) {
+			const { promise, resolve } = Promise.withResolvers<Action>();
+			this.#selectorController.showSelector(done => {
+				const selector = new OutboxSelectorComponent(store, {
+					currentSessionId: this.session.sessionManager.getSessionId(),
+					onClose: () => {
+						done();
+						resolve({ type: "close" });
+					},
+					onAdd: sessionId => {
+						const destinations = outboxDestinations(this.session, store);
+						done();
+						resolve({ type: "add", sessionId, destinations });
+					},
+					onResume: sessionId => {
+						const destinations = outboxDestinations(this.session, store);
+						done();
+						resolve({ type: "resume", sessionId, destinations });
+					},
+					onEdit: job => {
+						done();
+						resolve({ type: "edit", job });
+					},
+					requestRender: () => this.ui.requestRender(),
+				}, state);
+				return { component: selector, focus: selector };
+			});
+			const action = await promise;
+			if (action.type === "close") return;
+			if (action.type === "edit") {
+				let draft = action.job.text;
+				while (true) {
+					const edited = await this.showHookEditor("Edit Outbox Message", draft);
+					if (edited === undefined || edited === action.job.text) break;
+					draft = edited;
+					try {
+						store.edit(action.job.id, { text: draft });
+						break;
+					} catch (error) {
+						this.showError(error instanceof Error ? error.message : String(error));
+					}
+				}
+				continue;
+			}
+			const destinations = action.destinations;
+			let destination = destinations.find(target => target.sessionId === action.sessionId);
+			if (action.sessionId === undefined) {
+				const choices = destinations.map((target, index) => ({
+					label: outboxDestinationLabel(target, index),
+					description: `${target.cwd} · ${target.provider}/${target.model} · ${target.activity}`,
+				}));
+				const choice = await this.showHookSelector(
+					action.type === "resume" ? "Resume existing work — choose chat" : "Add outbox message — choose chat",
+					choices,
+				);
+				if (choice === undefined) continue;
+				destination = destinations.find((_, index) => choices[index]?.label === choice);
+			}
+			if (!destination) {
+				this.showError("The selected chat is no longer available.");
+				continue;
+			}
+			if (action.type === "resume") {
+				try {
+					const job = await armOutboxResume(this.session, destination);
+					state.selectedJobId = job.id;
+					this.showStatus(`Armed resume #${job.position} for ${destination.sessionName} when quota returns.`);
+				} catch (error) {
+					state.selectedJobId = store.list().find(job =>
+						job.kind === "resume" && job.sessionId === destination.sessionId &&
+						job.resumeUserEntryId === destination.lastUserEntryId &&
+						job.state !== "completed" && job.state !== "cancelled",
+					)?.id;
+					this.showError(error instanceof Error ? error.message : String(error));
+				}
+				continue;
+			}
+			let draft = "";
+			while (true) {
+				const entered = await this.showHookEditor(
+					`Queue for ${destination.sessionName} · ${destination.provider}/${destination.model}`,
+					draft,
+					undefined,
+					{ promptStyle: true },
+				);
+				if (entered === undefined || !entered.trim()) break;
+				draft = entered;
+				try {
+					const job = await enqueueOutboxDestination(this.session, store, destination, { text: draft });
+					state.selectedJobId = job.id;
+					this.showStatus(`Queued message #${job.position} for ${destination.sessionName}.`);
+					break;
+				} catch (error) {
+					this.showError(error instanceof Error ? error.message : String(error));
+				}
+			}
+		}
+	}
+
 
 	showThinkingSelector(): void {
 		this.#selectorController.showThinkingSelector();
@@ -8593,6 +8702,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	): Promise<void> {
 		return this.#inputController.handleQueueCommand(message, detached);
 	}
+	/** Queue slash-command input for outbox / reset. */
+	handleOutboxAddCommand(
+		message?: string,
+		detached?: Pick<SubmittedUserInput, "text" | "images" | "imageLinks">,
+	): Promise<void> {
+		return this.#inputController.handleQueueForReset(message, detached);
+	}
+
 
 	handleBtwCommand(question: string): Promise<void> {
 		return this.#btwController.start(question);
