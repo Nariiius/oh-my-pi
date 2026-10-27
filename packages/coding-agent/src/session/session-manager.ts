@@ -151,6 +151,17 @@ export class SessionMoveRefusedError extends Error {
 	}
 }
 
+/**
+ * Thrown when an outbox claim fails because another live process owns the session,
+ * or when an outbox-claimed session refuses a silent sibling fork.
+ */
+export class SessionOutboxClaimError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "SessionOutboxClaimError";
+	}
+}
+
 function nowIso(): string {
 	return new Date().toISOString();
 }
@@ -1014,6 +1025,8 @@ export class SessionManager {
 	 * {@link #moveOffSessionFile}, {@link createBranchedSession}). Never rejects.
 	 */
 	#pendingArtifactCopy: { sessionFile: string; done: Promise<void> } | undefined;
+	/** When true, moving this session to a sibling file throws SessionOutboxClaimError instead of silently forking. */
+	#refuseSilentFork = false;
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#cwd = cwd;
@@ -1125,6 +1138,28 @@ export class SessionManager {
 		this.#claimSession();
 		const claim = this.#sessionClaim;
 		return claim !== undefined && claim.sessionId === this.#sessionId && claim.release === undefined;
+	}
+
+	/** Whether another live omp process owns this session. */
+	isOwnedElsewhere(): boolean {
+		return this.#sessionOwnedElsewhere();
+	}
+
+	/**
+	 * Strictly claim this session for outbox processing: acquires the session lease
+	 * and marks the manager to refuse any silent sibling fork on conflict.
+	 * @throws {SessionOutboxClaimError} if the session is owned elsewhere or released.
+	 */
+	claimForOutbox(): void {
+		if (this.#released) {
+			throw new SessionOutboxClaimError("Cannot claim released session for outbox");
+		}
+		this.#refuseSilentFork = true;
+		if (this.#sessionOwnedElsewhere()) {
+			throw new SessionOutboxClaimError(
+				`Session "${this.#sessionFile ?? this.#sessionId}" is owned by another live process; outbox refused silent fork.`,
+			);
+		}
 	}
 
 	/**
@@ -1261,6 +1296,11 @@ export class SessionManager {
 	 * await it. Returns the sibling.
 	 */
 	#moveOffSessionFile(reason: SessionPersistenceNotice["reason"]): string {
+		if (this.#refuseSilentFork) {
+			throw new SessionOutboxClaimError(
+				`Session "${this.#sessionFile ?? this.#sessionId}" cannot move to a sibling: outbox strict ownership refused silent fork (reason: ${reason}).`,
+			);
+		}
 		const from = this.#sessionFile as string;
 		const previousSessionId = this.#sessionId;
 		const timestamp = nowIso();
