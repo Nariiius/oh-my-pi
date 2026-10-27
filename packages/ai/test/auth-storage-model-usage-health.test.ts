@@ -200,6 +200,34 @@ describe("AuthStorage model usage health", () => {
 		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.05);
 	});
 
+	it("distinguishes the earliest recheck from when every exhausted window clears", async () => {
+		const now = Date.now();
+		const short = limit("5-hour", 1);
+		const weekly = limit("7-day", 1);
+		short.window = { id: "5-hour", resetsAt: now + 60_000 };
+		weekly.window = { id: "7-day", resetsAt: now + 86_400_000 };
+		const storage = await createStorage([oauthRow(1)], {
+			"account-1": report("account-1", [short, weekly]),
+		});
+		const health = await storage.health.model("anthropic", { modelId: "claude", reserveFraction: 0 });
+		expect(health.accounts[0]).toMatchObject({
+			state: "depleted", resetsAt: now + 60_000, clearedAt: now + 86_400_000,
+		});
+	});
+
+	it("does not promise recovery when an exhausted limit has no reset", async () => {
+		const timed = limit("short", 1);
+		const permanent = limit("spending-cap", 1);
+		permanent.window = { id: "spending-cap" };
+		const storage = await createStorage([oauthRow(1)], {
+			"account-1": report("account-1", [timed, permanent]),
+		});
+		const health = await storage.health.model("anthropic", { modelId: "claude", reserveFraction: 0 });
+		expect(health.accounts[0]?.state).toBe("depleted");
+		expect(health.accounts[0]?.resetsAt).toBe(timed.window!.resetsAt);
+		expect(health.accounts[0]?.clearedAt).toBeUndefined();
+	});
+
 	it("expires short and long usage windows independently", async () => {
 		const now = Date.now();
 		const usageReport = report("account-1", [limit("5-hour", 1), limit("7-day", 0.95)]);
