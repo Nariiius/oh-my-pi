@@ -135,19 +135,27 @@ function formatTimeAgo(date: Date): string {
 	return date.toLocaleDateString();
 }
 
+export type SessionDisplayNameInput = Pick<SessionInfo, "title"> &
+	Partial<Pick<SessionInfo, "firstMessage" | "created" | "modified">>;
+
 /**
  * Friendly display name for a session: explicit title, then first user prompt,
  * then a timestamp-based label. The raw UUID `id` is intentionally never used —
  * it is unfriendly and indistinguishable from neighboring sessions in the UI.
  */
-export function sessionDisplayName(info: SessionInfo): string {
+export function sessionDisplayName(info: SessionDisplayNameInput): string {
 	const title = sanitizeSessionName(info.title);
 	if (title) return title;
 	const first =
 		info.firstMessage && info.firstMessage !== "(no messages)" ? sanitizeSessionName(info.firstMessage) : undefined;
 	if (first) return first;
-	const created = info.created.getTime();
-	const ts = Number.isFinite(created) ? created : info.modified.getTime();
+	const created = info.created?.getTime();
+	const modified = info.modified?.getTime();
+	const ts = typeof created === "number" && Number.isFinite(created)
+		? created
+		: typeof modified === "number" && Number.isFinite(modified)
+			? modified
+			: Date.now();
 	const date = new Date(ts);
 	const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 	return `Untitled · ${time}`;
