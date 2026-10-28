@@ -25,3 +25,7 @@ export const STATS_ACTIVITY_WORKER_ARG = "__omp_worker_stats_activity";
 export const TEXT_PREDICT_WORKER_ARG = "__omp_worker_text_predict";
 /** Terminal-output selector shared by the CLI dispatcher and worker launcher. */
 export const TERMINAL_OUTPUT_WORKER_ARG = "__omp_worker_terminal_output";
+/** Durable outbox coordinator, hosted by the ordinary CLI executable. */
+export const OUTBOX_WORKER_ARG = "__omp_worker_outbox";
+/** Distinguishes coordinators with independent per-chat resume scheduling. */
+export const OUTBOX_WORKER_READY = "outbox: ready protocol=3";
