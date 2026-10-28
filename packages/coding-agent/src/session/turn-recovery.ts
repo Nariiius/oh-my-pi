@@ -3117,6 +3117,13 @@ export class TurnRecovery {
 		this.resolveRetry();
 	}
 
+	/** Transfer an actual backoff/credential wait to a durable scheduler, never abort a provider request. */
+	abortRetryWait(): boolean {
+		if (!this.#retryAbortController) return false;
+		this.abortRetry();
+		return true;
+	}
+
 	async #promptAgentWithIdleRetry(
 		messages: AgentMessage[],
 		options?: { toolChoice?: ToolChoice },
