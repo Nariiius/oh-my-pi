@@ -6,8 +6,12 @@
 
 - Preserve atomic pasted-file attachments in the upstream composer's guarded draft-edit path, including submit-time file ingestion.
 - Show the model provider and compact active-account identity in the native Tern composer, refreshing the account label when credentials rotate.
+- Keep the Queue action centered and separated from quota and Send in Tern's Console composer.
 ### Added
 
+- Added a native composer **Queue** action and configurable `app.message.queueForReset` (`Ctrl+Alt+Q`) for saving drafts without sending; existing follow-up shortcuts remain unchanged.
+
+- Keep provider quotas in an independent native composer item between session cost and Stop, preserving the stock cost tooltip and other extension statuses.
 - Added `modelEnds` to `GroupedFileSection`: per file, the model-line index just past its last line, so a caller cutting the output can tell which files it shows whole ([#16594](https://github.com/can1357/oh-my-pi/pull/16594) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
