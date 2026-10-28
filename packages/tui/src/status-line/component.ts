@@ -144,7 +144,12 @@ export function statusSegmentPriority(side: "left" | "right", index: number, cou
 
 /** A native `seg` for a segment view; `dim` fades its spans while focus-proxied. */
 function describeSeg(key: string, props: TspProps<"seg">, view: SegmentView, dim: boolean): NativeNode {
-	props.spans = dim ? view.spans.map(part => ({ ...part, s: part.s ? `${part.s} dim` : "dim" })) : view.spans;
+	props.spans = dim
+		? view.spans.map(part => ({
+				...part,
+				s: part.s ? `${part.s} dim` : "dim",
+			}))
+		: view.spans;
 	if (view.icon !== undefined) props.icon = view.icon;
 	if (view.tone !== undefined) props.tone = view.tone;
 	if (view.title !== undefined) props.title = view.title;
@@ -299,7 +304,9 @@ function messageFingerprint(msg: AgentMessage): string {
 		}
 	} else if (role === "assistant") {
 		const assistantMsg = msg as AssistantMessage;
-		const usageExt = assistantMsg.usage as unknown as { promptTokensDetails?: unknown };
+		const usageExt = assistantMsg.usage as unknown as {
+			promptTokensDetails?: unknown;
+		};
 		const usageTotal = assistantMsg.usage?.totalTokens ?? 0;
 		const promptBuckets = usageExt?.promptTokensDetails ? 1 : 0;
 		const stopReason = assistantMsg.stopReason ?? "";
@@ -771,7 +778,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#activeRepoCache: ActiveRepoCache | undefined;
 
 	// Git status caching (1s TTL)
-	#cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+	#cachedGitStatus: {
+		staged: number;
+		unstaged: number;
+		untracked: number;
+	} | null = null;
 	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
 	#gitStatusGeneration = 0;
@@ -780,7 +791,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#jjBranchLastFetch = 0;
 	#jjResolveSeq = 0;
 	#jjBranchActive: JjResolveRequest | undefined = undefined;
-	#cachedJjStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+	#cachedJjStatus: {
+		staged: number;
+		unstaged: number;
+		untracked: number;
+	} | null = null;
 	#jjStatusLastFetch = 0;
 	#jjStatusActive: JjResolveRequest | undefined = undefined;
 	// Bumped on every jj-cache reset — a cwd switch (#applyCwdChange) or a HEAD /
@@ -1784,7 +1799,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#jjStatusActive = request;
 			const generation = this.#jjCacheGeneration;
 			(async () => {
-				let next: { staged: number; unstaged: number; untracked: number } | null = null;
+				let next: {
+					staged: number;
+					unstaged: number;
+					untracked: number;
+				} | null = null;
 				try {
 					next = await repository.statusSummary(
 						AbortSignal.any([request.controller.signal, AbortSignal.timeout(JJ_COMMAND_TIMEOUT_MS)]),
@@ -1819,7 +1838,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const generation = this.#gitStatusGeneration;
 
 		(async () => {
-			let nextStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+			let nextStatus: {
+				staged: number;
+				unstaged: number;
+				untracked: number;
+			} | null = null;
 			try {
 				nextStatus = (await repository.statusSummary()) ?? null;
 			} catch {
@@ -2247,7 +2270,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 	#normalizeUsageReports(
 		reports: unknown,
-		context: { provider?: string; modelId?: string; identity?: OAuthAccountIdentity },
+		context: {
+			provider?: string;
+			modelId?: string;
+			identity?: OAuthAccountIdentity;
+		},
 	): {
 		tier?: string;
 		fiveHour?: { percent: number; resetMinutes?: number };
@@ -2362,7 +2389,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				if (group) {
 					group.candidates.push(displayCandidate);
 				} else {
-					scopeGroups.set(scopeKey, { priority, tier, candidates: [displayCandidate] });
+					scopeGroups.set(scopeKey, {
+						priority,
+						tier,
+						candidates: [displayCandidate],
+					});
 				}
 			}
 		}
@@ -2460,7 +2491,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			}
 		}
 		if (!fiveHour && !daily && !sevenDay && !monthly && !resetCredits) return null;
-		return { tier: selectedGroup.tier, fiveHour, daily, sevenDay, monthly, resetCredits };
+		return {
+			tier: selectedGroup.tier,
+			fiveHour,
+			daily,
+			sevenDay,
+			monthly,
+			resetCredits,
+		};
 	}
 
 	/**
@@ -2507,7 +2545,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			cache.tokenizerRef === tokenizer &&
 			cache.skillsRef === skills
 		) {
-			return { usedTokens: cache.usedTokens, contextWindow: cache.contextWindow };
+			return {
+				usedTokens: cache.usedTokens,
+				contextWindow: cache.contextWindow,
+			};
 		}
 
 		const usage = typeof this.session.getContextUsage === "function" ? this.session.getContextUsage() : undefined;
@@ -2667,7 +2708,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const mergedSegmentOptions: StatusLineSettings["segmentOptions"] = {};
 
 		for (const [segment, options] of Object.entries(presetDef.segmentOptions ?? {})) {
-			mergedSegmentOptions[segment as keyof StatusLineSegmentOptions] = { ...(options as Record<string, unknown>) };
+			mergedSegmentOptions[segment as keyof StatusLineSegmentOptions] = {
+				...(options as Record<string, unknown>),
+			};
 		}
 
 		for (const [segment, options] of Object.entries(this.#settings.segmentOptions ?? {})) {
@@ -3177,7 +3220,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					let newMaxLen = Math.max(4, Math.min(currentMaxLen, currentPathVW) - shrinkBy);
 					const pathCtx = (maxLen: number): SegmentContext => ({
 						...ctx,
-						options: { ...ctx.options, path: { ...ctx.options.path, maxLength: maxLen } },
+						options: {
+							...ctx.options,
+							path: { ...ctx.options.path, maxLength: maxLen },
+						},
 					});
 					let reRendered = renderSegment("path", pathCtx(newMaxLen));
 					if (reRendered.visible && reRendered.content) {
@@ -3371,7 +3417,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const rawAccentHex = accentHex ?? theme.getColorHex("borderAccent");
 		let dimmedAccent = this.#dimmedAccentMemo;
 		if (dimmedAccent?.sourceHex !== rawAccentHex) {
-			dimmedAccent = { sourceHex: rawAccentHex, hex: adjustHsv(rawAccentHex, { s: 0.7, v: 0.75 }) };
+			dimmedAccent = {
+				sourceHex: rawAccentHex,
+				hex: adjustHsv(rawAccentHex, { s: 0.7, v: 0.75 }),
+			};
 			this.#dimmedAccentMemo = dimmedAccent;
 		}
 		const thresholdColor = getSessionAccentAnsi(dimmedAccent.hex) ?? usedColor;
@@ -3706,10 +3755,41 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				),
 			);
 		}
+		const providerUsageStatus = this.#hookStatuses.get("usage-remaining");
+		const providerUsage = providerUsageStatus
+			? node(
+					"row",
+					{
+						role: "omp.composer.provider-usage",
+						actions: { click: "status.cost" },
+					},
+					[
+						node(
+							"text",
+							{
+								role: "omp.composer.provider-usage.data",
+								text: sanitizeStatusText(providerUsageStatus),
+								wrap: "none",
+							},
+							undefined,
+							"data",
+						),
+					],
+					"provider-usage",
+				)
+			: undefined;
 		const collect = (side: "left" | "right", ids: readonly StatusLineSegmentId[]): void => {
 			ids.forEach((id, index) => {
 				if (COMPOSER_HOMED_SEGMENTS[id]) return;
-				const view = describeSegment(id, ctx);
+				const view = describeSegment(
+					id,
+					id === "status" && providerUsageStatus
+						? {
+								...ctx,
+								hookStatuses: ctx.hookStatuses.filter(status => status !== providerUsageStatus),
+							}
+						: ctx,
+				);
 				if (!view) return;
 				const props: TspProps<"seg"> = {
 					role: "omp.composer.fact",
@@ -3727,9 +3807,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// Hook statuses the `status` segment doesn't already carry trail the configured facts.
 		if ((this.#settings.showHookStatus ?? true) && !segments.includes("status")) {
 			this.#sortedHookStatuses.forEach((status, index) => {
+				if (status === providerUsageStatus) return;
 				const text = sanitizeStatusText(status);
 				if (!text) return;
-				const props: TspProps<"seg"> = { role: "omp.composer.fact", priority: 0 };
+				const props: TspProps<"seg"> = {
+					role: "omp.composer.fact",
+					priority: 0,
+				};
 				facts.push(describeSeg(`hook-${index}`, props, { spans: [span(text)] }, dim));
 			});
 		}
@@ -3776,7 +3860,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				style: "bar",
 				thresholds: getContextMeterThresholds(window),
 				...(used !== null && speculationAt !== null && used > speculationAt
-					? { parts: [{ value: speculationAt }, { value: used - speculationAt, token: "accent" }] }
+					? {
+							parts: [{ value: speculationAt }, { value: used - speculationAt, token: "accent" }],
+						}
 					: {}),
 				...(marks.length > 0 ? { marks } : {}),
 				...(pct === null ? {} : { label: `${Math.round(pct)}%` }),
@@ -3809,7 +3895,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// The effort chip carries the thinking level.
 		const modelCtx: SegmentContext = {
 			...ctx,
-			options: { ...ctx.options, model: { ...ctx.options.model, showThinkingLevel: false } },
+			options: {
+				...ctx.options,
+				model: { ...ctx.options.model, showThinkingLevel: false },
+			},
 		};
 		const model = describeSegment("model", modelCtx) ?? { spans: [] };
 		const provider = this.session.state.model?.provider;
@@ -3818,8 +3907,15 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		return {
 			context,
 			model,
-			extras: node("status", { role: "omp.composer.extras", transparent: true, grow: 1 }, facts, "extras"),
+			// Optional facts get only spare bar width, rather than squeezing the model and controls.
+			extras: node(
+				"status",
+				{ role: "omp.composer.extras", transparent: true, grow: 1, basis: 0, min: { w: 0 } },
+				facts,
+				"extras",
+			),
 			usage,
+			providerUsage,
 		};
 	}
 
@@ -3897,7 +3993,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		});
 		const bar = node(
 			"status",
-			{ role: "omp.status", transparent: effectiveSettings.transparent === true },
+			{
+				role: "omp.status",
+				transparent: effectiveSettings.transparent === true,
+			},
 			segs,
 			"bar",
 		);
@@ -3909,7 +4008,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				...this.#sortedHookStatuses.map((status, index) =>
 					node(
 						"text",
-						{ text: sanitizeStatusText(status), wrap: "none", role: "omp.status.hook" },
+						{
+							text: sanitizeStatusText(status),
+							wrap: "none",
+							role: "omp.status.hook",
+						},
 						undefined,
 						`hook-${index}`,
 					),
@@ -3998,7 +4101,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// ── Line 2: Stats + context + model ────────────────────────
 		const parts: string[] = [];
 
-		const stats = sm?.getUsageStatistics?.() ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		const stats = sm?.getUsageStatistics?.() ?? {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			cost: 0,
+		};
 		const fmt = (n: number) =>
 			n < 1000 ? `${n}` : n < 10000 ? `${(n / 1000).toFixed(1)}k` : `${Math.round(n / 1000)}k`;
 
