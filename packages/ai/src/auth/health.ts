@@ -93,6 +93,7 @@ export class CredentialHealth implements HealthApi {
 	 */
 	async model(provider: Provider, options: ModelUsageHealthOptions): Promise<ModelUsageHealth> {
 		options.signal?.throwIfAborted();
+		await this.#deps.pool.adoptExternalChanges();
 		const origin = this.#deps.keys.source(provider);
 		const strategy = this.#deps.strategies(provider);
 		const usageProvider = this.#deps.usage.providerFor(provider);
@@ -156,6 +157,7 @@ export class CredentialHealth implements HealthApi {
 						credentialType,
 						state: "depleted",
 						resetsAt: blockedUntil,
+						clearedAt: blockedUntil,
 					};
 				}
 
@@ -187,6 +189,7 @@ export class CredentialHealth implements HealthApi {
 						credentialType,
 						state: "depleted",
 						resetsAt: blockedUntil,
+						clearedAt: blockedUntil,
 					};
 				}
 				if (!report) return { credentialId: entry.id, credentialType, state: "unknown" };
@@ -206,11 +209,18 @@ export class CredentialHealth implements HealthApi {
 					const futureResets = activeExhausted
 						.map(limit => limit.window?.resetsAt)
 						.filter((resetsAt): resetsAt is number => resetsAt !== undefined && resetsAt > nowMs);
+					const hasUnclockedExhausted = activeExhausted.some(
+						limit => limit.window?.resetsAt === undefined || limit.window.resetsAt <= nowMs,
+					);
 					return {
 						credentialId: entry.id,
 						credentialType,
 						state: "depleted",
 						resetsAt: futureResets.length > 0 ? Math.min(...futureResets) : undefined,
+						clearedAt:
+							!hasUnclockedExhausted && futureResets.length === activeExhausted.length
+								? Math.max(...futureResets)
+								: undefined,
 					};
 				}
 
