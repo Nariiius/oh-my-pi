@@ -15,6 +15,11 @@ It explicitly excludes context-overflow recovery via auto-compaction. Overflow i
 - [`../packages/coding-agent/src/modes/rpc/rpc-client.ts`](../packages/coding-agent/src/modes/rpc/rpc-client.ts)
 - [`../packages/coding-agent/src/modes/rpc/rpc-types.ts`](../packages/coding-agent/src/modes/rpc/rpc-types.ts)
 
+The cross-chat [`/outbox`](./slash-command-internals.md#14-built-in-command-note-outbox) coordinator uses this recovery path after accepting a queued prompt. Delivery temporarily enables authoritative `retry.waitForUsageReset` waits and disables model fallback, retaining the same job/input across resets. Retry pauses are not completion, and the original prompt is not appended again.
+
+An explicit `/outbox resume` watch is different: its durable scheduler owns quota availability checks and invokes the existing manual-retry continuation only when safe. Native `retry.enabled` is temporarily disabled for each watched attempt, so this works without `retry.waitForUsageReset` and cannot disappear when a transient retry budget ends. Repeated quota rejection returns the same original request to `watching`; ordinary completion adds no continuation prompt.
+
+
 ## Scope boundary vs compaction
 
 Retry and compaction are checked from the same `agent_end` path, but they are intentionally separated:
