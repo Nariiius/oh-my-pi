@@ -459,3 +459,56 @@ Without an interactive UI, `code-review` delegates to `/review` instead of openi
 ## 13) Built-in command note: `/plan-review`
 
 `/plan-review` reopens the Plan Review overlay for the latest plan (plan mode only). In the Contents sidebar `a` annotates the selected section; in the plan body `a` annotates the top visible line. `e` edits the annotation(s) at that section or line (with a chooser when several apply) and `u` undoes the latest section deletion or annotation change. The note editor behaves like `/annotate`'s: Enter saves, Shift+Enter inserts a newline, Escape discards the draft, the external-editor key replaces the draft without saving, and saving an empty edit deletes the annotation.
+
+## 14) Built-in command note: `/outbox`
+
+The outbox saves messages for their existing chats and selected models, then delivers messages in strict global order when quota is available. Resume watches run independently across chats, without overtaking earlier work in their own chat. It is separate from the in-memory follow-up queue.
+
+Write a draft and press `Ctrl+Alt+Q` (`app.message.queueForReset`), or use **Queue** in the native Tern composer. Text and images are persisted before clearing the editor. Saving does not arm the queue or make a model request.
+
+`/outbox` opens **Current chat** by default. Tab or the native **Current chat / All chats** buttons change the visible scope, not scheduling. Rows and selected details show chat title, project, queued model, live activity, and outbox state. A blocked entry identifies the actual blocking job and chat, even outside the current view; unrelated resume watches are not labelled blocked. Stale or stopped activity is explicitly unavailable rather than shown as idle.
+
+Press `a` / **Add Message** inside the view. Current-chat mode binds to that chat; All-chats mode asks for a destination from current/live registered chats and previously queued destinations. Saving appends in global order; cancelling leaves the original composer alone, and failed saves retain the new text. The destination and queued model are captured before editing. Native text editors and the terminal editor both return to the same scope.
+
+Select with arrows or the native pointer; `e` edits text, `u`/`d` reorder unsent entries, `x` cancels, `r` retries a blocked entry, and Space/Enter runs or pauses existing unresolved work. Normal Enter submission and Ctrl+Q/Ctrl+Enter follow-ups are unchanged. Collaboration guests cannot manage the host's outbox.
+
+### Resume existing work without adding a message
+
+With no unresolved outbox entries, **Space/Enter or Arm resume** creates and arms a visible **Resume · watching** entry instead of toggling an empty queue. Current-chat mode watches the current request; All-chats mode asks which chat. `c` / **Resume chat**, or `/outbox resume`, explicitly arms this even when other jobs exist. Repeated arming of the same request reuses its pending watch.
+
+Resume watches retain the original user-entry identity. They do not append a `Continue` prompt. Active work is left alone; normal completion finishes the watch without another request. On a recorded usage-limit failure, the outbox independently rechecks quota and retries the original failed turn with native auto-retry disabled for that attempt. Only a known native retry sleep can transfer to the outbox; running provider/tool requests are not aborted. Another quota failure returns to **watching**, with the next check visible.
+
+An interrupted, quota-waiting, or running job in another chat does not stop a resume watch. Each chat admits one outbox delivery at a time, and earlier unresolved entries in the same chat remain barriers. Closed-chat resumes run concurrently with distinct SDK agent identities; shutdown aborts and drains all owned sessions before releasing the coordinator lease. Queued messages remain globally ordered even while unrelated watches run.
+
+The existing `retry.waitForUsageReset` toggle is not required for a resume watch. A newer manual request supersedes the watch; manual interruption, non-quota errors, and tool actions with unknown outcomes need attention. A new/empty chat has no previous task to resume and reports that clearly. Old sessions without request metadata must reopen before they can be armed from another chat.
+
+| Command | Action |
+| --- | --- |
+| `/outbox add <message>` | Save against the current chat, branch, model and thinking level |
+| `/outbox resume` | Save and arm an independent quota-resume watch for the current request; no new prompt |
+| `/outbox run` / `/outbox pause` | Arm / stop new dispatches without aborting active work |
+| `/outbox cancel <id>` | Cancel unsent work, or request normal cancellation of its running turn |
+| `/outbox remove <id>` | Permanently remove an inactive entry and its saved image copies; retain chat history |
+| `/outbox retry <id>` | Recheck blocked work; never reinsert an already accepted prompt |
+| `/outbox move <id> <position>` | Reorder pending entries without displacing an active head |
+| `/outbox edit <id> <text>` | Replace unsent text |
+| `omp outbox [list] --json` | Inspect the same queue from another terminal |
+| `omp outbox run` / `pause` / `cancel` / `remove` / `retry` / `move` | Equivalent CLI management |
+| `omp outbox edit <id> --text "..."` | Replace unsent text through the CLI |
+
+Slash commands accept exact IDs or unambiguous prefixes; the CLI requires exact IDs. Editing text does not retarget the chat/model: cancel and queue from the intended chat with the intended model selected.
+
+In the outbox selector, **Remove** (native button) or **Delete** removes the selected entry, including completed/cancelled entries and pending resume watches. On a Mac keyboard without forward Delete, use **Fn+Delete**. Removal is permanent; it does not undo already-delivered prompts, tool effects, or chat history. A dispatching/running entry must first be cancelled and allowed to stop before removal; **Cancel** (`x`) alone keeps the entry available for retry.
+
+Storage is private SQLite at `<agentDir>/outbox/outbox.db`, with private durable attachments; credentials are not stored there. The coordinator uses omp's persistent process supervisor. Live chats accept their own work; closed chats resume only after acquiring their exact session lease. Chats running older code must reload or close before delivery. The worker never silently forks a destination.
+
+Activity snapshots use an additive registry table and bounded heartbeat/event updates; no reasoning text or tool arguments are copied. Resume jobs use a distinct `watching` state and a database normalization trigger, so older workers cannot mistake them for new messages. Worker protocol 3 supports independent watches and safely upgrades a paused/idle coordinator, including one blocked on attention. Active older deliveries must finish before upgrading. Reopen participating chats with updated omp: an already-running live adapter cannot hot-load the new scheduler.
+
+The first unresolved **message** holds later messages, including when quota is unknown, the chat is busy, authentication needs attention, or a previous turn failed. It blocks resume watches only in its own chat. Applicable short/weekly/model limits and account permissions are respected across eligible accounts. Reset deadlines trigger fresh checks, not unconditional sending. Providers without usable quota telemetry remain waiting rather than being probed with paid generation.
+
+Delivery temporarily preserves the queued model/effort, disables model fallback and automatic prewalk, allows authoritative reset waits, and never relaxes the captured approval policy. Permission prompts, operator interrupts and incomplete tool-use outcomes do not advance the queue.
+
+Atomic acceptance and completion receipts are stored in the original session journal. After a process dies: absent acceptance may retry; completed work advances; accepted-but-unfinished work requires inspection. Resume attempts also persist a safe quota-wait outcome, allowing another attempt without inserting a prompt. Exactly-once external tool effects cannot be guaranteed after a crash; ambiguous work is never replayed automatically.
+
+While any independently admissible work is runnable/waiting, the coordinator holds an idle-sleep assertion; pause or entirely blocked work releases it. An unrelated attention entry does not suppress the assertion for resume watches. Display sleep is allowed; forced sleep/shutdown still pauses execution. The queue survives reboot, but omp is not a boot service: restart omp or run `omp outbox run` to resume supervision.
+
