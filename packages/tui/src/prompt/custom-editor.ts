@@ -56,7 +56,10 @@ const NATIVE_COMPOSER_PLACEHOLDER = "What are we cooking?";
 /** Live composer state the TSP layout shows; the interactive host wires {@link CustomEditor.composerState}. */
 export interface ComposerNativeState {
 	/** The draft runs as a shell command (`!`, `!!`) or Python (`$`, `$$`); `excluded` keeps it from the model. */
-	readonly shell?: { readonly kind: "bash" | "python"; readonly excluded: boolean };
+	readonly shell?: {
+		readonly kind: "bash" | "python";
+		readonly excluded: boolean;
+	};
 	/** Thinking effort word (`high`, `off`, `auto`); undefined when the model has no thinking. */
 	readonly thinking?: string;
 	/** The thinking level draws as the model chip's icon instead of its own chip (where the terminal has `effort`). */
@@ -90,6 +93,7 @@ interface ComposerControls {
 	readonly model: NativeNode | undefined;
 	readonly effort: NativeNode | undefined;
 	readonly dictation: NativeNode | undefined;
+	readonly queue: NativeNode | undefined;
 	readonly submit: NativeNode;
 }
 
@@ -126,6 +130,7 @@ type ConfigurableEditorAction = Extract<
 	| "app.model.select"
 	| "app.model.selectTemporary"
 	| "app.message.dequeue"
+	| "app.message.outbox"
 	| "app.retry"
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
@@ -144,6 +149,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.model.select": ["alt+m"],
 	"app.model.selectTemporary": ["alt+p"],
 	"app.message.dequeue": ["alt+up", "shift+up"],
+	"app.message.outbox": ["ctrl+alt+q"],
 	"app.retry": ["f5", "alt+r"],
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
@@ -411,7 +417,12 @@ export interface FileAttachment {
 
 /** One visible composer attachment, in band order (vision, files, then text pastes). */
 export type ComposerChipDescriptor =
-	| { kind: "image" | "video"; n: number; image: ImageContent; link: string | undefined }
+	| {
+			kind: "image" | "video";
+			n: number;
+			image: ImageContent;
+			link: string | undefined;
+	  }
 	| { kind: "file"; n: number; file: FileAttachment }
 	| { kind: "paste"; n: number; text: TextAttachment };
 
@@ -502,7 +513,10 @@ export class CustomEditor extends Editor {
 
 	/** Independently configure typo detection, the word-completion engine, and autocorrect. */
 	setSpellingFeatures(features: SpellingFeatures): void {
-		this.#spelling.setFeatures({ typoDetection: features.typoDetection, autocorrect: features.autocorrect });
+		this.#spelling.setFeatures({
+			typoDetection: features.typoDetection,
+			autocorrect: features.autocorrect,
+		});
 		this.#wordCompletion.setMethod(features.autocomplete);
 	}
 
@@ -993,12 +1007,20 @@ export class CustomEditor extends Editor {
 				const marker = QUEUE_LIST_MARKER_RE.exec(value);
 				if (marker) {
 					const indent = marker[1]?.length ?? 0;
-					decor.push({ from: lineStart + indent, to: lineStart + marker[0].length, s: "accent" });
+					decor.push({
+						from: lineStart + indent,
+						to: lineStart + marker[0].length,
+						s: "accent",
+					});
 				}
 			}
 			const context = { editorText: text, lines, line, startCol: 0, typing };
 			for (const typo of this.#spelling.typoRanges(value, context)) {
-				decor.push({ from: lineStart + typo.start, to: lineStart + typo.start + typo.length, s: "typo" });
+				decor.push({
+					from: lineStart + typo.start,
+					to: lineStart + typo.start + typo.length,
+					s: "typo",
+				});
 			}
 			lineStart += value.length + 1;
 		}
@@ -1151,14 +1173,21 @@ export class CustomEditor extends Editor {
 								rate !== undefined &&
 									node(
 										"rate",
-										{ value: rate, unit: "tok/s", role: "omp.composer.rate", title: "Generation rate" },
+										{
+											value: rate,
+											unit: "tok/s",
+											role: "omp.composer.rate",
+											title: "Generation rate",
+										},
 										undefined,
 										"rate",
 									),
 								// The status facts are the bar's flexible space; without them a spacer keeps send at the end.
 								facts?.extras ?? node("row", { grow: 1 }, [], "gap"),
 								facts?.usage,
+								facts?.providerUsage,
 								controls.dictation,
+								controls.queue,
 								controls.submit,
 							]),
 							{ role: "omp.composer.bar", gap: "sm", align: "center" },
@@ -1166,7 +1195,11 @@ export class CustomEditor extends Editor {
 						"bar",
 					);
 		const line = keyed(
-			row(compact([controls.mode, input]), { role: "omp.composer.line", align: "start", gap: "sm" }),
+			row(compact([controls.mode, input]), {
+				role: "omp.composer.line",
+				align: "start",
+				gap: "sm",
+			}),
 			"line",
 		);
 		const layout: NativeEditorLayout = {
@@ -1175,7 +1208,16 @@ export class CustomEditor extends Editor {
 			children: compact([facts?.context, controls.focus, chips, line, bar]),
 			caret: "line/input",
 		};
-		this.#nativeComposer = { key, facts, chips, input, rate, controls, bar, layout };
+		this.#nativeComposer = {
+			key,
+			facts,
+			chips,
+			input,
+			rate,
+			controls,
+			bar,
+			layout,
+		};
 		return layout;
 	};
 
@@ -1301,7 +1343,11 @@ export class CustomEditor extends Editor {
 								? node("effort", { level: thinking }, undefined, "glyph")
 								: node(
 										"meter",
-										{ value: effortSteps === undefined ? null : effortSteps / 4, style: "blocks", steps: 4 },
+										{
+											value: effortSteps === undefined ? null : effortSteps / 4,
+											style: "blocks",
+											steps: 4,
+										},
 										undefined,
 										"meter",
 									),
@@ -1342,6 +1388,24 @@ export class CustomEditor extends Editor {
 						"dictation",
 					);
 		const dictating = dictationHoldsDraft(state.dictation);
+		const queueKey = this.#actionKeys.get("app.message.outbox")?.[0];
+		const queueHint = queueKey ? `  ${formatTooltipKey(queueKey)}` : "";
+		const queue = !state.running
+			? node(
+					"row",
+					{
+						role: "omp.composer.queue",
+						align: "center",
+						shrink: 0,
+						title: `Queue for reset${queueHint}`,
+						tone: dictating ? "muted" : undefined,
+						actions: dictating ? undefined : { click: "queue.reset" },
+					},
+					// Console gives custom action roles no horizontal padding.
+					[node("text", { text: " Queue ", wrap: "none" }, undefined, "label")],
+					"queue",
+				)
+			: undefined;
 		const submit = state.running
 			? node(
 					"text",
@@ -1367,7 +1431,7 @@ export class CustomEditor extends Editor {
 					undefined,
 					"send",
 				);
-		if (!shell) return { focus, mode: undefined, model, effort, dictation, submit };
+		if (!shell) return { focus, mode: undefined, model, effort, dictation, queue, submit };
 		const runs = shell.kind === "bash" ? "Runs in your shell" : "Runs in Python";
 		const mode = keyed(
 			row(
@@ -1376,7 +1440,10 @@ export class CustomEditor extends Editor {
 						node("icon", { name: "eye-off", title: "Not sent to the model" }, undefined, "excluded"),
 					node(
 						"text",
-						{ spans: [span(shell.kind, shell.kind === "bash" ? "bashMode" : "pythonMode")], wrap: "none" },
+						{
+							spans: [span(shell.kind, shell.kind === "bash" ? "bashMode" : "pythonMode")],
+							wrap: "none",
+						},
 						undefined,
 						"label",
 					),
@@ -1390,7 +1457,7 @@ export class CustomEditor extends Editor {
 			),
 			"mode",
 		);
-		return { focus, mode, model, effort, dictation, submit };
+		return { focus, mode, model, effort, dictation, queue, submit };
 	}
 
 	/**
@@ -1444,6 +1511,9 @@ export class CustomEditor extends Editor {
 			case "interrupt":
 				this.onEscape?.();
 				return;
+			case "queue.reset":
+				this.onQueueForReset?.();
+				return;
 			default:
 				if (event.act.startsWith(FOCUS_ACTION)) this.onFocusAgent?.(event.act.slice(FOCUS_ACTION.length));
 				else this.composerFacts?.handleNativeEvent(event);
@@ -1482,6 +1552,8 @@ export class CustomEditor extends Editor {
 	onPasteTextRaw?: () => void;
 	/** Called when the configured dequeue shortcut is pressed. */
 	onDequeue?: () => void;
+	/** Called when the configured outbox / queue-for-reset shortcut or native action is triggered. */
+	onQueueForReset?: () => void;
 	/** Called when the configured retry shortcut is pressed. */
 	onRetry?: () => void;
 	/** Called when Caps Lock is pressed. */
@@ -1850,6 +1922,12 @@ export class CustomEditor extends Editor {
 				this.onDequeue();
 				return;
 			}
+			// Intercept configured outbox / queue-for-reset shortcut
+			if (this.#matchesAction(canonical, "app.message.outbox") && this.onQueueForReset) {
+				this.onQueueForReset();
+				return;
+			}
+
 
 			// Intercept configured copy-prompt shortcut
 			if (this.#matchesAction(canonical, "app.clipboard.copyPrompt") && this.onCopyPrompt) {
