@@ -283,7 +283,7 @@ describe("ModelBrowser search ranking", () => {
 		// accident of naming.
 		const browser = makeBrowser(
 			[
-				makeModel("nvidia", "nemotron-3-nano"),
+				makeModel("nvidia", "nemotron-3-nano", { pricingStatus: "free" }),
 				makeModel("anthropic", "claude-sonnet-4-5", {
 					cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 				}),
@@ -301,7 +301,7 @@ describe("ModelBrowser search ranking", () => {
 		// Both match; the contiguous-literal tier must keep the ":free" id on
 		// top rather than collapsing every zero-cost model into one tier.
 		const browser = makeBrowser(
-			[makeModel("nvidia", "nemotron-3-nano"), makeModel("kilo", "liquid/lfm-2.5-2.6b:free")],
+			[makeModel("nvidia", "nemotron-3-nano", { pricingStatus: "free" }), makeModel("kilo", "liquid/lfm-2.5-2.6b:free")],
 			[],
 		);
 
@@ -316,7 +316,7 @@ describe("ModelBrowser search ranking", () => {
 		// matching — narrowing a model name by cost, not just a bare "free".
 		const browser = makeBrowser(
 			[
-				makeModel("nvidia", "moonshotai/kimi-k3"),
+				makeModel("nvidia", "moonshotai/kimi-k3", { pricingStatus: "free" }),
 				makeModel("moonshot", "moonshotai/kimi-k3", {
 					cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
 				}),
@@ -439,13 +439,12 @@ describe("ModelBrowser native model metadata", () => {
 			}),
 		);
 
-		expect(detail).toContain("swe-2 · new · beta · recommended · 128k ctx · 1k out · free per M");
-		// Tabs and newlines are flattened so the blurb stays one detail row.
-		expect(detail).toMatch(/free per M · Fast {2,}agentic coder$/);
+		expect(detail).toContain("swe-2 · new · beta · recommended · 128k ctx · 1k out · pricing unknown");
+		expect(detail).toMatch(/pricing unknown · Fast {2,}agentic coder$/);
 	});
 
 	test("models without upstream metadata render the plain detail line", () => {
-		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · free per M");
+		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · pricing unknown");
 	});
 
 	test("labels declared pricing states instead of calling the zero rate card free", () => {
@@ -502,7 +501,7 @@ describe("ModelBrowser native model metadata", () => {
 		expect(renderDetail(repriced)).toContain("$4/20 per M");
 	});
 
-	test("price rows preserve free labels and identify invalid rates", () => {
+	test("unknown and missing prices are not advertised as free", () => {
 		const zero = makeModel("fixture", "zero");
 		const missing = makeModel("fixture", "missing");
 		Object.assign(missing, { cost: undefined });
@@ -515,17 +514,21 @@ describe("ModelBrowser native model metadata", () => {
 		const invalid = makeModel("fixture", "invalid");
 		invalid.cost.input = -1;
 		invalid.cost.output = Number.POSITIVE_INFINITY;
-		const browser = makeBrowser([zero, missing, partial, negativeZero, invalid], []);
+		const free = makeModel("fixture", "complimentary", { pricingStatus: "free" });
+		const browser = makeBrowser([zero, missing, partial, negativeZero, invalid, free], []);
 		const rows = browser.render(100).map(line => Bun.stripANSI(line));
-		expect(rows.find(line => line.includes("fixture/zero"))).toContain("free");
-		expect(rows.find(line => line.includes("fixture/missing"))).toContain("free");
+		expect(rows.find(line => line.includes("fixture/zero"))).toContain("unknown");
+		expect(rows.find(line => line.includes("fixture/missing"))).toContain("unknown");
+		expect(rows.find(line => line.includes("fixture/complimentary"))).toContain("free");
 		expect(rows.find(line => line.includes("fixture/partial"))).toContain("$?/2");
 		expect(rows.find(line => line.includes("fixture/negative-zero"))).toContain("$?/0");
 		expect(rows.find(line => line.includes("fixture/invalid"))).toContain("$?/?");
 
 		browser.setQuery("free");
 		const freeRows = browser.render(100).map(line => Bun.stripANSI(line));
-		expect(freeRows.some(line => line.includes("fixture/zero"))).toBe(true);
+		expect(freeRows.some(line => line.includes("fixture/zero"))).toBe(false);
+		expect(freeRows.some(line => line.includes("fixture/missing"))).toBe(false);
+		expect(freeRows.some(line => line.includes("fixture/complimentary"))).toBe(true);
 		expect(freeRows.some(line => line.includes("fixture/negative-zero"))).toBe(false);
 	});
 
