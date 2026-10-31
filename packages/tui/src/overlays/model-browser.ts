@@ -731,23 +731,16 @@ function roleChipSpans(role: string, assignment: RoleAssignment, settings: Model
 	return spans;
 }
 
-/**
- * The non-rate pricing state a catalog rule declared for a zero-rate row
- * (`pricing-status`), or `undefined` when the row publishes rates or declares
- * nothing. Undeclared zero-rate rows keep the `free` convention below.
- */
+/** Pricing state for a zero-rate card, unless a separate credit rate is available. */
 function declaredPricingStatus(model: Model): Exclude<ModelPricingStatus, "fixed"> | undefined {
-	if (model.pricingStatus === undefined) return undefined;
+	if (model.factoryDroidCredits !== undefined && model.factoryDroidCredits > 0) return undefined;
+	if (!model.cost) return "unknown";
 	const status = getModelPricingStatus(model);
 	return status === "fixed" ? undefined : status;
 }
-/** No token price and no subscription-credit charge (unless a pricing state is declared). */
+
 function isFreeModel(model: Model): boolean {
-	const declared = declaredPricingStatus(model);
-	if (declared !== undefined) return declared === "free";
-	const cost = model.cost ? getEffectiveTokenCost(model.cost) : undefined;
-	const credits = model.factoryDroidCredits;
-	return (!cost || (cost.input === 0 && cost.output === 0)) && (credits === undefined || credits === 0);
+	return declaredPricingStatus(model) === "free";
 }
 
 /** One per-million price leg: `3`, `0.25`, `12.5`; `?` when unknown. */
@@ -2254,7 +2247,7 @@ export class ModelBrowser implements Component {
 			});
 		}
 		fact("Max output", out > 0 ? out.toLocaleString("en-US") : undefined);
-		fact("Price", isFreeModel(model) ? "free" : `${previewPrice(model)} per M`);
+		fact("Price", declaredPricingStatus(model) !== undefined ? previewPrice(model) : `${previewPrice(model)} per M`);
 		fact("Speed", speed.length > 0 ? speed.join(" · ") : undefined);
 		fact("Intelligence", model.int != null && Number.isFinite(model.int) ? String(Math.round(model.int)) : undefined);
 		fact("Input", model.input.join(" · "));
