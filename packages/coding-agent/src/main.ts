@@ -694,11 +694,6 @@ async function runInteractiveMode(
 			}),
 		);
 		startDeferredStartupWork?.();
-		void import("./cli/models-cli")
-			.then(({ startBackgroundStartupModelProbe }) => {
-				void startBackgroundStartupModelProbe(session, settings);
-			})
-			.catch(() => {});
 
 		if (setupWizard && playStartupSplash) {
 			await setupWizard.runStartupSplash(mode);
