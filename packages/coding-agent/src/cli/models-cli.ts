@@ -531,6 +531,7 @@ export function createModelProbe(
 						return resolved;
 					},
 					maxTokens: 16,
+					acceptEmptyResponse: true,
 					disableReasoning: model.thinking?.requiresEffort ? false : true,
 					signal: signal
 						? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal])
@@ -983,59 +984,4 @@ export function recordProbeResults(settings: Settings, results: readonly ModelPr
 			error: result.error,
 		})),
 	);
-}
-
-export const PROBE_STALENESS_TTL_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Automatically probes models in the background on startup if it has been more
- * than a day (24 hours) since the last probe, or if models were never probed.
- * Non-blocking, failure-isolated, and does not delay TUI startup.
- */
-export async function startBackgroundStartupModelProbe(
-	session: {
-		modelRegistry: ModelRegistry;
-	},
-	settings: Settings,
-	options: {
-		probeModel?: ProbeModelFn;
-		stalenessTtlMs?: number;
-	} = {},
-): Promise<void> {
-	const storage = settings.getStorage?.();
-	if (!storage) return;
-
-	const stalenessTtl = options.stalenessTtlMs ?? PROBE_STALENESS_TTL_MS;
-	const lastProbe = storage.getLastModelProbeTime();
-	if (lastProbe !== undefined && Date.now() - lastProbe < stalenessTtl) {
-		return;
-	}
-
-	const registry = session.modelRegistry;
-	const available = registry.getAvailable();
-	if (available.length === 0) return;
-
-	const enabledPatterns = cfgEnabledModels.get(settings);
-	let modelsToProbe = available;
-	if (enabledPatterns && enabledPatterns.length > 0) {
-		const matched = new Set<Model<Api>>();
-		for (const pattern of enabledPatterns) {
-			for (const m of filterModelsByPattern(available, pattern)) {
-				matched.add(m);
-			}
-		}
-		if (matched.size > 0) {
-			modelsToProbe = Array.from(matched);
-		}
-	}
-
-	if (modelsToProbe.length === 0) return;
-
-	try {
-		const probeModel = options.probeModel ?? createModelProbe(registry, 15_000);
-		const results = await runModelProbes(modelsToProbe, probeModel, { concurrency: 4 });
-		recordProbeResults(settings, results);
-	} catch {
-		// Failure-isolated: background probe errors are silent
-	}
 }
