@@ -212,7 +212,6 @@ export class AgentStorage {
 	#listModelPerfStmt: Statement;
 	#upsertModelProbeStmt: Statement;
 	#listModelProbeStmt: Statement;
-	#latestModelProbeTimeStmt: Statement;
 	#usageStmts: Record<UsageKind, UsageStatements>;
 	#modelUsageCache: string[] | null = null;
 	/** Only the real user db auto-imports stats.db history; custom paths (tests, embedding) opt in explicitly. */
@@ -267,9 +266,6 @@ ON CONFLICT(model_key) DO UPDATE SET
 		);
 		this.#listModelProbeStmt = this.#db.prepare(
 			"SELECT model_key, ok, latency_ms, error, probed_at FROM model_probe_results",
-		);
-		this.#latestModelProbeTimeStmt = this.#db.prepare(
-			"SELECT MAX(probed_at) as latest_probed_at FROM model_probe_results",
 		);
 		this.#usageStmts = {
 			command: this.#prepareUsageStatements("command"),
@@ -524,7 +520,6 @@ FROM model_usage_legacy
 		this.#listModelPerfStmt.finalize();
 		this.#upsertModelProbeStmt.finalize();
 		this.#listModelProbeStmt.finalize();
-		this.#latestModelProbeTimeStmt.finalize();
 		for (const kind of USAGE_KINDS) {
 			const stmts = this.#usageStmts[kind];
 			stmts.upsert.finalize();
@@ -739,23 +734,6 @@ FROM model_usage_legacy
 			logger.warn("AgentStorage failed to read model probe results", { error: String(error) });
 		}
 		return records;
-	}
-
-	/**
-	 * Epoch milliseconds of the most recent model probe result in the database,
-	 * or undefined if no models have ever been probed.
-	 */
-	getLastModelProbeTime(): number | undefined {
-		try {
-			const row = this.#latestModelProbeTimeStmt.get() as { latest_probed_at: number | null } | undefined;
-			if (!row || row.latest_probed_at === null || row.latest_probed_at === undefined || row.latest_probed_at <= 0) {
-				return undefined;
-			}
-			return row.latest_probed_at < 1e11 ? row.latest_probed_at * 1000 : row.latest_probed_at;
-		} catch (error) {
-			logger.warn("AgentStorage failed to read latest model probe time", { error: String(error) });
-			return undefined;
-		}
 	}
 
 	/**
