@@ -326,6 +326,32 @@ describe("createModelProbe across every API family", () => {
 		expect(seen[0]!.body.max_output_tokens).toBe(16);
 	});
 
+	test("does not bill repeated chat-completions probes for a successful empty response", async () => {
+		let requests = 0;
+		const fetch: FetchImpl = async () => {
+			requests++;
+			return sseResponse([
+				{ id: "silent", choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: "stop" }] },
+			]);
+		};
+
+		expect(await probe(makeModel("openai-completions", "silent-model", "http://127.0.0.1:9/v1"), fetch)).toBe(true);
+		expect(requests).toBe(1);
+	});
+
+	test("does not bill repeated Gemini probes for a successful empty response", async () => {
+		let requests = 0;
+		const fetch: FetchImpl = async () => {
+			requests++;
+			return sseResponse([{ candidates: [{ content: { role: "model", parts: [] }, finishReason: "STOP" }] }]);
+		};
+
+		expect(await probe(makeModel("google-generative-ai", "silent-model", "http://127.0.0.1:9/v1beta"), fetch)).toBe(
+			true,
+		);
+		expect(requests).toBe(1);
+	});
+
 	test("a provider that 404s surfaces the failure with its HTTP status", async () => {
 		const fetch: FetchImpl = async () =>
 			new Response(JSON.stringify({ error: { message: "model not found", type: "invalid_request_error" } }), {
