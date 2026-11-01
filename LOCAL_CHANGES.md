@@ -21,6 +21,21 @@ git log --oneline "$base"..HEAD -- packages/coding-agent/src/cli/models-cli.ts
 
 After each upstream integration, record the actual integrated upstream commit here, refresh this inventory against it, and add/remove preservation rules as behavior converges with upstream. Do not replace the baseline with the latest remote tip unless it was actually integrated.
 
+## Durable cross-chat outbox
+
+- `packages/coding-agent/src/outbox/` owns private SQLite state, attachments, quota admission, ordered claiming, live delivery, crash reconciliation and the supervised worker. CLI/slash commands, `OutboxSelectorComponent`, the input controller and native composer expose the shared controls.
+- Preserve the prompt admission lock and atomic `outbox.delivery` acceptance/user-message and completion receipts in `AgentSession`/`SessionManager`. A queued destination must never take the normal silent sibling-fork path when owned elsewhere.
+- SDK startup protects queued destinations before workspace/model writes; live root sessions participate in the profile inbox. Closed execution acquires the exact lease and uses the normal SDK, without enabling interactive approvals or widening permissions.
+- `ModelUsageAccountHealth.clearedAt` is the latest applicable exhausted reset, unlike `resetsAt` (earliest recheck). Unknown telemetry stays blocked. Preserve temporary no-fallback and authoritative-reset-wait overrides.
+- The coordinator reuses `launch/` persistent supervision and holds an idle-sleep assertion while armed work remains. It is not a boot service. Accepted-but-unfinished crashes require review, never unconditional `Continue` or prompt replay.
+- Preserve the Current/All view state, Add destination binding, live `session_snapshots` updates, stale status handling and safe editor roundtrip. Activity publishing is independent of the blocked delivery loop; native/terminal renderers must share the same status semantics.
+- Resume watches are `kind=resume`, anchored to `resumeUserEntryId`, and stay in `watching` while pending; a SQL trigger normalizes old `queued`/`waiting` updates so old workers cannot accidentally send the display label as a prompt. Preserve additive migration and atomic deduplication.
+- `outbox/resume.ts` drives independent quota waits and retries through the normal continuation pipeline with native auto-retry disabled per attempt. Preserve exclusive admission, cancellation, known-native-sleep takeover, same-request/no-new-prompt behavior, safe attempt receipts, and preserved held follow-up queues.
+- Scheduling separates globally ordered messages from independent per-chat resume watches. Preserve `outboxJobBlocker`/atomic claim parity, same-chat barriers, recovery of every dead owner, distinct SDK agent IDs for concurrent closed chats, executor draining, and worker protocol 3. UI blockers must use the same rules; a live old process must reopen to load them.
+- Worker adoption must distinguish the broker's `readyMatch` (the launching client's pattern) from the worker's advertised protocol. A protocol-3 worker launched by a protocol-2 client is compatible; verify its output and generation instead of restarting it. Wait for in-progress launches and concurrent replacement winners. Reopen all participating old chat processes to load client-side fixes; restarting only the worker cannot replace their in-memory code.
+- Outbox removal is an explicit permanent store operation shared by native/terminal controls and slash/CLI commands. Check active state under an immediate transaction, validate attachment ownership before deleting, and commit row removal before image cleanup so another process cannot claim a half-deleted job. Keep session history and delivery receipts untouched.
+- Verification: outbox store/readiness/delivery/coordinator/UI/selector/activity/destination/resume tests, independent multi-process status/resume scenarios with native retry disabled, existing retry/storage/editor/health regressions, and actual terminal/native Tern surfaces.
+
 ## Merge procedure
 
 1. Record the starting branch/HEAD and preserve any unrelated uncommitted work. Determine which remote is upstream; do not assume this fork's `origin` is upstream.
@@ -49,7 +64,7 @@ Paths in this section are relative to the repository root. Shared files delibera
 
 Applying a partial probe expands existing wildcard selectors, removes failed selectors inside the probe scope, preserves unprobed selectors and adds successful models. Failed pinned roles are pruned only after a nonempty merged set. An empty merged set currently writes `enabledModels=[]`, flushes settings and returns `applied:false`; that return is not a no-mutation guarantee. Zero successes can still yield `applied:true` if unprobed enabled selectors survive.
 
-**Side effects:** interactive startup automatically runs background probes when no health timestamp exists or it is older than 24 hours. It records health in storage but does not apply enabled-model settings. This is network traffic, not read-only discovery; explicit `--apply`/panel apply mutates configuration. The panel's legacy `autoApply` option is not a promise of automatic apply on completion.
+**Side effects:** probes run only on explicit CLI/slash commands, never automatically on startup. Each matching model sends a potentially billable request; use a provider/model filter to limit the run. Successful empty responses must not trigger replay requests. Health results are recorded without applying enabled-model settings; explicit `--apply`/panel apply mutates configuration. The panel's legacy `autoApply` option is not a promise of automatic apply on completion.
 
 **Checks:** `test/models-probe-cli.test.ts`, `test/models-probe-all-apis.test.ts`, `test/models-probe-panel.test.ts`, `test/slash-commands/models-probe-dispatch.test.ts` under coding-agent. The API integration file covers concrete API families, not every possible catalog API/provider.
 
