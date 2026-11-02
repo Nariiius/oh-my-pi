@@ -32,6 +32,8 @@ export interface CodingAgentCompileOptions {
 	readonly minifyIdentifiers?: boolean;
 	/** Disable Bun's built-in Darwin signing before the caller re-signs. */
 	readonly skipBuiltinCodesign?: boolean;
+	/** Pi-Bolt payload profile; only supported by its patched Bun runtime. */
+	readonly bytecodeOrder?: string;
 }
 
 /**
@@ -71,6 +73,7 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				// Bun's process-wide fetch User-Agent default. Any explicit
 				// provider fingerprint (Anthropic/Codex OAuth) still wins.
 				execArgv: [`--user-agent=${USER_AGENT}`],
+				...(options.bytecodeOrder ? { bytecodeOrder: options.bytecodeOrder } : {}),
 				...(options.executablePath
 					? { executablePath: options.executablePath }
 					: options.target
