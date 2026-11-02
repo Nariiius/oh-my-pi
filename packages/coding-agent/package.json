@@ -522,6 +522,7 @@
 	},
 	"scripts": {
 		"build": "bun scripts/build-binary.ts",
+		"build:aot": "bun scripts/build-aot.ts",
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
 		"check:types": "tsgo -p tsconfig.json --noEmit",
 		"lint": "oxlint .",

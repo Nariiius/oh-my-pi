@@ -8,12 +8,27 @@
 
 ### Fixed
 
+- Stopped automatic billable model-probe sweeps on interactive startup. Explicit probes still refresh health badges, and successful empty responses no longer trigger duplicate probe requests.
+- Model picker pricing now treats missing or undeclared zero-rate cards as unknown instead of advertising them as free; explicit free tiers remain searchable.
+
+- Adopt current outbox workers launched by older chats using the worker's readiness advertisement, not just the broker's matched readiness pattern; wait for concurrent startup/shutdown instead of replacing a worker still launching.
+- Resume outbox watches independently across chats, so an interrupted or quota-blocked job cannot stall unrelated recovery. Preserve ordered messages and exclusive same-chat delivery, drain concurrent closed-chat executors safely, and show the actual scheduling blocker in terminal and native views.
+- Keep queued steering and follow-up messages pending after terminal provider usage-limit errors instead of automatically sending them into another quota-rejected request; explicit retry resumes the preserved queue.
+
 - Preserve custom model probing, OAuth account selection, temporary model switches and file attachments when integrating upstream v18.12.6.
 - Publish native model-probe results in stable batches so unrelated redraws cannot interrupt failed-row removal; keep navigation and toggles on the highlighted model as rows disappear.
 - Attach pasted file paths as atomic composer chips with filename/path cards in terminal and Tern native input, using existing file ingestion on submit and preserving removal, undo, and cleared-draft recall.
 - Show the compact account identity used by each model probe alongside its provider/model in the probe panel, text reports, and JSON output; concurrent probes and credential rotation retain per-request attribution.
 - Refresh the displayed OAuth account when switching models, before the status line redraws, without sending a model request. API-key switches stay deferred, and a failed account selection leaves the current model unchanged.
 ### Added
+
+- Add an opt-in, host-only Pi-Bolt AOT build that writes `dist/omp-aot` without replacing the normal executable. Verify the AOT image and worker/dashboard smoke path before publishing; keep JIT and mutable builtins for runtime compatibility. macOS native shell/PTY children still inherit disabled ASLR, so this build remains experimental.
+
+- Remove saved outbox entries and their queued image copies with the native **Remove** button, **Delete**, `/outbox remove <id>`, or `omp outbox remove <id>`. Preserve chat history and refuse removal of in-flight deliveries until they stop.
+
+- Added a durable profile-wide outbox for ordered messages across existing chats: `/outbox`, `omp outbox`, native **Queue**, and `Ctrl+Alt+Q`. Quota-aware delivery preserves the selected chat/model, resumes closed chats under exclusive ownership, and reconciles durable receipts after interruption without blindly replaying prompts.
+- Add messages directly in `/outbox`, switch between Current chat and All chats, and inspect readable chat/project names, live tool/activity status, and quota-wait details without changing queue order.
+- Arm an existing chat for independent quota recovery with **Resume chat**, `/outbox resume`, or Space in an empty outbox; the visible durable watch retries the original request without injecting another prompt and does not interrupt work that is still running.
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
