@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 import { $ } from "bun";
+import { verifyAotBinary } from "../packages/coding-agent/scripts/build-aot";
 import { resolveCrossBuild } from "../packages/coding-agent/scripts/build-binary";
 import { compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
 
@@ -71,6 +72,7 @@ it("runs compiled bytecode containing dependency import.meta.resolve calls", asy
 	const result = await $`${outfile}`.quiet().nothrow();
 	expect(result.exitCode).toBe(0);
 	expect(result.text().trim()).toBe("node:fs");
+	await expect(verifyAotBinary(outfile, process.env)).rejects.toThrow("no usable AOT image");
 }, 30_000);
 
 it("runs code behind a lazy import() from a split chunk of the compiled binary", async () => {
