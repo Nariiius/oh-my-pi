@@ -466,6 +466,11 @@ land, failed models collapse under a `Failed (N)` row and stay unselectable,
 is recorded, and the model picker (`Ctrl+P`, `/model`) marks each model with
 its last verdict and age — `●2h` passed, `⦸5m` failed.
 
+Probes are explicit, never automatic on startup. Each run makes potentially
+billable requests for the matching models; use a provider or model filter to
+avoid sweeping the entire catalog. Successful empty responses count as healthy
+without retrying.
+
 ### Four knobs that make routing useful
 
 - **Custom providers** — Declare anything that speaks `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, `google-gemini-cli`, `google-vertex`, `typesafe`, `openrouter-decisions`, `openai-decisions`, or `workers-ai-systemone` (the judge APIs) in `~/.omp/agent/models.yml`.
@@ -722,6 +727,21 @@ For a non-interactive smoke check:
 ```sh
 bun dev -- --version
 ```
+
+### Experimental Pi-Bolt AOT build
+
+`bun run build:aot` builds a **separate** `packages/coding-agent/dist/omp-aot` executable (`omp-aot.exe` on Windows). It does not overwrite `dist/omp`, install a command, or change the normal build/release targets.
+
+Use the patched **runtime** from [Pi-Bolt's build instructions](https://github.com/opensec-git/Pi-Bolt/blob/bolt-v1.0.9/docs/BUILDING.md), not its prebuilt Pi executable. Its `scripts/fetch-runtime.sh` verifies the signed release checksums; `bolt-v1.0.9` was used for the macOS ARM64 smoke run. With omp's source dependencies and native addon already built:
+
+```sh
+PIBOLT_BUN=/absolute/path/to/Pi-Bolt/.work/runtime/bun bun run build:aot
+./packages/coding-agent/dist/omp-aot --version
+```
+
+The host-only build records an omp bytecode profile, compiles with JIT enabled for `bun:ffi` and runtime-loaded extensions, preserves mutable builtins, and requires both a registered AOT image and a successful `--smoke-test` before publishing the alternative. Stock Bun cannot silently produce a bytecode-only substitute.
+
+**macOS security limitation:** Pi-Bolt's static heap disables ASLR, which native Rust shell/PTY subprocesses inherit. Pi-Bolt's Bun subprocess helper does not cover those native paths. Keep this alternative for controlled experiments, not daily or untrusted command execution; native process isolation is required before promoting it. Performance improvement is not guaranteed.
 
 ### Debug Command
 
